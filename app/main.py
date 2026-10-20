@@ -746,6 +746,12 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
         """Convert a To-review item into a reserve ({method: hold|deposit, end_date?, …})."""
         return reserves.from_review(db, tid, body or {})
 
+    @app.post("/api/transactions/{tid}/to-reserve")
+    def tx_to_reserve(tid: int, body: dict = Body(default={})):
+        """Turn a posted expense into a reserve in place ({method: hold|deposit, end_date?, …}): a hold removes the
+        expense; a deposit turns it into the transfer to Deposits 押金 and links it."""
+        return reserves.from_transaction(db, tid, body or {})
+
     @app.get("/api/transactions/export.csv")
     def export_tx(request: Request):
         f = dict(request.query_params); f["limit"] = 100000; f["with_links"] = "1"

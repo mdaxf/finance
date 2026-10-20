@@ -1026,5 +1026,8 @@
  "Reserve reminder days after check-out must be 0–365": "退房后提醒天数必须在 0–365 之间",
  "Reserve reminder days after check-in must be 0–365": "入住后提醒天数必须在 0–365 之间",
  "No reminder": "不提醒",
- "Settled up": "已结清"
+ "Settled up": "已结清",
+ "More": "更多",
+ "The expense is removed: a hold is not spending.": "这笔支出会被移除：预授权不算消费。",
+ "The expense becomes the transfer to the Deposits account (same transaction, receipts kept).": "这笔支出会改为转入押金账户的转账（同一笔交易，收据保留）。"
 }

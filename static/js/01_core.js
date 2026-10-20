@@ -165,7 +165,19 @@ function renderNav() {
   const rc = S.meta ? S.meta.review_count + (S.meta.reserve_review_count || 0) : 0;
   $('#nav').innerHTML = ROUTES.map(([k, i, l]) => `<a href="#/${k}" class="${k === cur ? 'active' : ''}"><span class="ico">${i}</span>${l}${k === 'review' && rc ? `<span class="badge">${rc}</span>` : ''}${k === 'reserves' && S.meta && S.meta.reserve_review_count ? `<span class="badge" title="Holds found in emails to review">${S.meta.reserve_review_count}</span>` : ''}${k === 'reminders' && S.meta && S.meta.reminder_count ? `<span class="badge">${S.meta.reminder_count}</span>` : ''}</a>`).join('');
   const mob = ['home', 'transactions', 'accounts', 'review', 'settings'];
-  $('#mnav').innerHTML = ROUTES.filter(r => mob.includes(r[0])).map(([k, i, l]) => `<a href="#/${k}" class="${k === cur ? 'active' : ''}"><span class="ico">${i}</span>${l.split(' ')[0].replace('Quick', 'Review')}${k === 'review' && rc ? `<span class="badge">${rc}</span>` : ''}</a>`).join('');
+  const moreBadge = S.meta ? (S.meta.reserve_review_count || 0) + (S.meta.reminder_count || 0) : 0;
+  $('#mnav').innerHTML = ROUTES.filter(r => mob.includes(r[0])).map(([k, i, l]) => `<a href="#/${k}" class="${k === cur ? 'active' : ''}"><span class="ico">${i}</span>${l.split(' ')[0].replace('Quick', 'Review')}${k === 'review' && rc ? `<span class="badge">${rc}</span>` : ''}</a>`).join('')
+    + `<a href="javascript:void 0" id="mnavMore" class="${mob.includes(cur) ? '' : 'active'}"><span class="ico">☰</span>More${moreBadge ? `<span class="badge">${moreBadge}</span>` : ''}</a>`;
+  $('#mnavMore').onclick = mobileMore;
+}
+/* phone: every page that isn't on the bottom bar (Reserves, Investments, Budgets, Reminders, …) */
+function mobileMore() {
+  const mob = ['home', 'transactions', 'accounts', 'review', 'settings'], m = S.meta || {};
+  const cur = (location.hash.slice(2) || 'home').split(/[/?]/)[0];
+  const badge = k => k === 'reserves' && m.reserve_review_count ? m.reserve_review_count : k === 'reminders' && m.reminder_count ? m.reminder_count : 0;
+  const bg = modal('More', `<div class="mnav-more">${ROUTES.filter(r => !mob.includes(r[0])).map(([k, i, l]) =>
+    `<a href="#/${k}" class="${k === cur ? 'active' : ''}"><span class="ico">${i}</span><span>${l}</span>${badge(k) ? `<span class="badge">${badge(k)}</span>` : ''}</a>`).join('')}</div>`);
+  $$('.mnav-more a', bg).forEach(a => a.onclick = () => bg.close());
 }
 function renderLedgers() {
   const sel = $('#ledgerSel');
