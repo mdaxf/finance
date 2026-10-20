@@ -437,6 +437,9 @@ def _remind(db: Database, s: dict, tpl: dict, d: date) -> dict:
 
 def _generate(db: Database, s: dict, tpl: dict, d: date, review: bool) -> dict:
     """Create one occurrence + its idempotency row atomically."""
+    if s.get("loan_id"):  # Loan Center: the occurrence posts the split repayment (principal transfer + interest …)
+        from .loans import post_scheduled
+        return post_scheduled(db, s, d, review)
     rates = ledger.fx_rates(db)
     data = dict(tpl, date=f"{d.isoformat()} {s['time_of_day']}", source="scheduled",
                 status="review" if review else "posted", raw_text=f"Scheduled: {s['name']}")
@@ -511,6 +514,12 @@ def month_remaining(db: Database, month: str | None = None, ledger_id: int | Non
         except ValueError:
             continue
         kind = tpl.get("kind") or "expense"
+        if s.get("loan_id"):
+            loan_kind = "income" if (db.one("SELECT direction FROM loans WHERE id=?", (s["loan_id"],)) or {}).get("direction") == "lent" else "expense"
+            if ledger_id and int(tpl.get("ledger_id") or default_ledger) != int(ledger_id):
+                continue
+            _loan_remaining(db, s, tpl, loan_kind, lo, last, base, rates, out)
+            continue
         if kind not in ("expense", "income"):
             continue
         if ledger_id and int(tpl.get("ledger_id") or default_ledger) != int(ledger_id):
@@ -548,3 +557,23 @@ def month_remaining(db: Database, month: str | None = None, ledger_id: int | Non
     out["net"] = round(out["income"] - out["expense"], 2)
     out["count"] = out["income_count"] + out["expense_count"]
     return out
+
+
+def _loan_remaining(db: Database, s: dict, tpl: dict, kind: str, lo: date, last: date, base: str, rates, out: dict) -> None:
+    """A loan schedule's occurrence: only its interest (+ escrow) is spending / income; the principal is a transfer."""
+    from .loans import expected_flow
+    sb = _d(s["skip_before"])
+    done = {r["occurrence_date"] for r in db.all("SELECT occurrence_date FROM schedule_occurrences WHERE schedule_id=?", (s["id"],))}
+    for d in iter_occurrences(s, last):
+        if d < lo or (sb and d < sb) or d.isoformat() in done:
+            continue
+        f = expected_flow(db, s["loan_id"], d)
+        if not f or f[1] <= 0:
+            continue
+        v, cur = f[1], f[2]
+        vb = round(ledger.convert(v, cur, base, rates), 2)
+        out[kind] += vb
+        out[f"{kind}_count"] += 1
+        out["items"].append({"date": f"{d.isoformat()} {s['time_of_day']}", "schedule_id": s["id"], "name": s["name"], "kind": kind,
+                             "amount": v, "currency": cur, "amount_base": vb, "post_mode": s["post_mode"], "variable_amount": False,
+                             "account_name": None, "loan_id": s["loan_id"]})

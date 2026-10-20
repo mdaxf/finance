@@ -176,6 +176,11 @@ def clear_demo(db: Database) -> dict:
         con.execute("DELETE FROM reminders WHERE kind='reserve' AND reserve_id IN (SELECT id FROM reserves WHERE is_demo=1)")
         con.execute("DELETE FROM reserves WHERE is_demo=1")
         demo_accts = [r[0] for r in con.execute("SELECT id FROM accounts WHERE is_demo=1")]
+        for tbl in ("loan_links", "loan_events"):
+            con.execute(f"DELETE FROM {tbl} WHERE loan_id IN (SELECT id FROM loans WHERE is_demo=1 OR account_id IN (SELECT id FROM accounts WHERE is_demo=1))")
+        con.execute("DELETE FROM reminders WHERE kind='loan' AND loan_id IN (SELECT id FROM loans WHERE is_demo=1 OR account_id IN (SELECT id FROM accounts WHERE is_demo=1))")
+        con.execute("DELETE FROM schedules WHERE loan_id IN (SELECT id FROM loans WHERE is_demo=1 OR account_id IN (SELECT id FROM accounts WHERE is_demo=1))")
+        con.execute("DELETE FROM loans WHERE is_demo=1 OR account_id IN (SELECT id FROM accounts WHERE is_demo=1)")
         q = ",".join("?" * len(demo_accts)) or "NULL"
         n = con.execute(f"DELETE FROM transactions WHERE is_demo=1 OR note LIKE '[DEMO]%' OR account_id IN ({q}) OR to_account_id IN ({q})",
                         demo_accts + demo_accts).rowcount

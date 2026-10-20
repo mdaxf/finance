@@ -305,6 +305,12 @@ class Database:
                 out.append("accounts.system_role")
             if "reminders" in tables and "reserve_id" not in {r[1] for r in con.execute("PRAGMA table_info(reminders)")}:
                 out.append("reminders.reserve_id")
+            if "loans" not in tables or "loan_links" not in tables or "loan_events" not in tables:
+                out.append("loans")
+            if "schedules" in tables and "loan_id" not in {r[1] for r in con.execute("PRAGMA table_info(schedules)")}:
+                out.append("schedules.loan_id")
+            if "reminders" in tables and "loan_id" not in {r[1] for r in con.execute("PRAGMA table_info(reminders)")}:
+                out.append("reminders.loan_id")
             return out
         finally:
             con.close()
@@ -516,6 +522,35 @@ class Database:
             if "reserve_id" not in {r[1] for r in con.execute("PRAGMA table_info(reminders)")}:
                 con.execute("ALTER TABLE reminders ADD COLUMN reserve_id INTEGER")
             con.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_rem_reserve ON reminders(reserve_id) WHERE kind='reserve'")
+            # Loan Center 借贷中心 (additive): money lent / borrowed. A loan owns one account (loan / payable / receivable)
+            # whose balance is what is still owed; loan_events group the linked transactions of one disbursement or
+            # repayment (principal = transfer, interest / escrow / fee = expense or income). No rows are created here.
+            con.execute("""CREATE TABLE IF NOT EXISTS loans (
+                id INTEGER PRIMARY KEY, ledger_id INTEGER, direction TEXT NOT NULL, name TEXT DEFAULT '', counterparty TEXT DEFAULT '',
+                kind TEXT DEFAULT 'person', account_id INTEGER NOT NULL, pay_account_id INTEGER, currency TEXT NOT NULL,
+                principal REAL, start_date TEXT NOT NULL, rate REAL DEFAULT 0, freq TEXT NOT NULL DEFAULT 'none', first_due TEXT,
+                term INTEGER, payment REAL, escrow REAL, interest_category_id INTEGER, escrow_category_id INTEGER, maturity_date TEXT,
+                schedule_id INTEGER, adopted_schedule_id INTEGER, status TEXT NOT NULL DEFAULT 'active', closed_at TEXT,
+                closed_reason TEXT, remind INTEGER DEFAULT 1, note TEXT DEFAULT '', is_demo INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now','localtime')), updated_at TEXT)""")
+            con.execute("""CREATE TABLE IF NOT EXISTS loan_events (
+                id INTEGER PRIMARY KEY, loan_id INTEGER NOT NULL, kind TEXT NOT NULL, date TEXT NOT NULL, due_date TEXT,
+                account_id INTEGER, note TEXT, created_at TEXT DEFAULT (datetime('now','localtime')))""")
+            con.execute("""CREATE TABLE IF NOT EXISTS loan_links (
+                id INTEGER PRIMARY KEY, loan_id INTEGER NOT NULL, event_id INTEGER NOT NULL, transaction_id INTEGER NOT NULL,
+                role TEXT NOT NULL, amount REAL NOT NULL, created_at TEXT DEFAULT (datetime('now','localtime')))""")
+            con.execute("CREATE INDEX IF NOT EXISTS ix_loan_acct ON loans(account_id)")
+            con.execute("CREATE INDEX IF NOT EXISTS ix_lev_loan ON loan_events(loan_id, date)")
+            con.execute("CREATE INDEX IF NOT EXISTS ix_llk_loan ON loan_links(loan_id)")
+            con.execute("CREATE INDEX IF NOT EXISTS ix_llk_tx ON loan_links(transaction_id)")
+            con.execute("CREATE INDEX IF NOT EXISTS ix_llk_event ON loan_links(event_id)")
+            con.execute("""CREATE TRIGGER IF NOT EXISTS trg_tx_delete_loan AFTER DELETE ON transactions BEGIN
+                DELETE FROM loan_links WHERE transaction_id=OLD.id; END""")
+            if "loan_id" not in {r[1] for r in con.execute("PRAGMA table_info(schedules)")}:
+                con.execute("ALTER TABLE schedules ADD COLUMN loan_id INTEGER")
+            if "loan_id" not in {r[1] for r in con.execute("PRAGMA table_info(reminders)")}:
+                con.execute("ALTER TABLE reminders ADD COLUMN loan_id INTEGER")
+            con.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_rem_loan ON reminders(loan_id) WHERE kind='loan'")
             # cursor pagination / account history (additive indexes)
             con.execute("CREATE INDEX IF NOT EXISTS ix_tx_date_id ON transactions(date, id)")
             con.execute("CREATE INDEX IF NOT EXISTS ix_tx_acct_date ON transactions(account_id, date, id)")

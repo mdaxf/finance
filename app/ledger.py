@@ -599,6 +599,8 @@ def update_tx(db: Database, tid: int, data: dict) -> dict:
         con.execute(f"UPDATE transactions SET {','.join(c + '=?' for c in cols)} WHERE id=?", [tx[k] for k in cols] + [tid])
         from .reserves import check_tx_update  # reserve 押金 links: kind/currency locked, whole-amount links follow
         check_tx_update(con, orig, tx)
+        from .loans import check_tx_update as loan_check  # loan 借贷 links: kind locked, amounts follow
+        loan_check(con, orig, tx)
         if not tx.get("reimbursable"):
             con.execute("UPDATE transactions SET reimb_writeoff=0 WHERE id=?", (tid,))
     return get_tx(db, tid)
@@ -639,7 +641,8 @@ def get_tx(db: Database, tid: int) -> dict | None:
         return None
     from .reimburse import annotate  # local import: reimburse imports this module
     from .reserves import annotate as reserve_badges
-    return reserve_badges(db, annotate(db, [decorate(r)], links=True))[0]
+    from .loans import annotate as loan_badges
+    return loan_badges(db, reserve_badges(db, annotate(db, [decorate(r)], links=True)))[0]
 
 
 def _tx_where(f: dict) -> tuple[str, list]:
@@ -716,7 +719,8 @@ def query_tx(db: Database, f: dict) -> tuple[list[dict], int]:
     rows = db.all(f"{TX_SELECT}{w} ORDER BY t.date DESC, t.id DESC LIMIT ? OFFSET ?", params + [limit, offset])
     from .reimburse import annotate
     from .reserves import annotate as reserve_badges
-    return reserve_badges(db, annotate(db, [decorate(r) for r in rows], links=bool(f.get("with_links")))), total
+    from .loans import annotate as loan_badges
+    return loan_badges(db, reserve_badges(db, annotate(db, [decorate(r) for r in rows], links=bool(f.get("with_links"))))), total
 
 
 def encode_cursor(t: dict) -> str:
@@ -766,6 +770,8 @@ def page_tx(db: Database, f: dict) -> dict:
     annotate(db, rows)  # reimbursement status badges
     from .reserves import annotate as reserve_badges
     reserve_badges(db, rows)  # reserve 押金/预授权 badges
+    from .loans import annotate as loan_badges
+    loan_badges(db, rows)  # loan 借贷 badges
     out = {"items": rows, "has_more": has_more, "next_cursor": encode_cursor(rows[-1]) if has_more and rows else None}
     if not cur or str(f.get("with_total", "")).lower() in ("1", "true"):
         s = _summary(db, w, params)

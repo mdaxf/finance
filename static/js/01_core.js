@@ -157,7 +157,7 @@ function typeOptions(selected) { return Object.entries(S.meta.account_types).map
 /* ---------- navigation ---------- */
 const ROUTES = [
   ['home', '🏠', 'Home'], ['dashboard', '📊', 'Dashboard'], ['transactions', '🧾', 'Transactions'], ['accounts', '🏦', 'Accounts'],
-  ['investments', '📈', 'Investments'], ['budgets', '🎯', 'Budgets'], ['scheduled', '🔁', 'Scheduled'], ['reimb', '🧾', 'Reimbursements'], ['reserves', '🔒', 'Reserves'], ['reminders', '⏰', 'Reminders'], ['projects', '📁', 'Projects'], ['reports', '📉', 'Reports'],
+  ['investments', '📈', 'Investments'], ['budgets', '🎯', 'Budgets'], ['scheduled', '🔁', 'Scheduled'], ['reimb', '🧾', 'Reimbursements'], ['reserves', '🔒', 'Reserves'], ['loans', '🤝', 'Loans'], ['reminders', '⏰', 'Reminders'], ['projects', '📁', 'Projects'], ['reports', '📉', 'Reports'],
   ['review', '📥', 'Quick add & Review'], ['settings', '⚙️', 'Settings'],
 ];
 function renderNav() {
