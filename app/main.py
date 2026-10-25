@@ -73,6 +73,16 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
         ingest.MSG_LANG.set(ingest.resolve_lang(request.query_params.get("lang"), request.headers.get("accept-language")))
         return await call_next(request)
 
+    @app.middleware("http")
+    async def static_cache_mw(request: Request, call_next):
+        # app code (js / css / locales) is revalidated on every load (cheap 304 via ETag) so a deploy reaches phones
+        # at once; without it Safari / home-screen apps keep running old scripts heuristically
+        resp = await call_next(request)
+        p = request.url.path
+        if p.startswith("/static/") and not p.startswith("/static/vendor/") and p.endswith((".js", ".css")):
+            resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
     # ------------------------------------------------------------ auth middleware
     @app.middleware("http")
     async def auth_mw(request: Request, call_next):
