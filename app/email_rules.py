@@ -46,7 +46,9 @@ PRESET_RULES: list[dict[str, Any]] = [
      "note": "中国银行卡/信用卡动账短信或邮件, e.g. 您尾号1234的信用卡…消费人民币35.00元 (best effort)"},
 ]
 
-RULE_KINDS = ("auto", "expense", "income", "refund", "balance", "hold")
+RULE_KINDS = ("auto", "expense", "income", "refund", "balance", "hold", "bill", "bill_paid")
+# kind "bill": a bill / payment request -> a payment task (Bills) with a reminder; "bill_paid": a payment confirmation
+# -> matched to the open bill (or kept for review). With "auto" these are detected by bills.classify().
 # kind "hold": a card authorization / pre-authorization alert -> a card-hold Reserve (预授权) in the review queue
 # Templates offered in Settings → Parsing rules → "From template" (NOT inserted automatically; saved disabled).
 RULE_TEMPLATES: list[dict[str, Any]] = [

@@ -166,8 +166,8 @@ def refresh(db: Database, on: date | None = None) -> int:
 
 def run(db: Database, on: date | None = None, notify: bool = True) -> dict:
     on = on or today(db)
-    new = generate_cards(db, on) + generate_expiry(db, on) + generate_reserves(db, on)
-    done = refresh(db, on) + refresh_expiry(db, on) + refresh_reserves(db, on)
+    new = generate_cards(db, on) + generate_expiry(db, on) + generate_reserves(db, on) + generate_credits(db, on) + generate_bills(db, on)
+    done = refresh(db, on) + refresh_expiry(db, on) + refresh_reserves(db, on) + refresh_credits(db, on) + refresh_bills(db, on)
     sent = notify_due(db, on) if notify else 0
     return {"as_of": on.isoformat(), "created": len(new), "auto_completed": done, "notified": sent}
 
@@ -200,6 +200,12 @@ def _decorate(db: Database, r: dict, on: date) -> dict:
         r["expired"] = bool(due and due < on)
     if r["kind"] == "reserve":
         r.update(reserve_info(db, r))
+    if r["kind"] == "credit":
+        r.update(credit_info(db, r))
+        r["paid"] = None
+        r["expired"] = bool(due and due < on)
+    if r["kind"] == "bill":
+        r.update(bill_info(db, r))
     return r
 
 
@@ -210,6 +216,15 @@ def lead_days(db: Database, r: dict) -> int:
         return expiry_lead(db)
     if r.get("kind") == "reserve":
         return 0  # an unreleased hold / unrefunded deposit is chased from its due date (check-out + N days) on
+    if r.get("kind") == "credit":  # the whole window: credit_expiry_lead_months (default 6) before the expiry date
+        from . import credits
+        return credits.lead_days_for(r["due_date"], credits.lead_months(db)) if r.get("due_date") else 0
+    if r.get("kind") == "bill":  # the bill's own lead days, else bill_reminder_lead_days (default 3)
+        b = db.one("SELECT lead_days FROM bills WHERE id=?", (r.get("bill_id"),)) or {}
+        if b.get("lead_days") is not None:
+            return int(b["lead_days"])
+        from . import bills
+        return bills.lead_days(db)
     if r.get("kind") == "schedule" and r.get("schedule_id"):
         s = db.one("SELECT lead_days FROM schedules WHERE id=?", (r["schedule_id"],)) or {}
         if s.get("lead_days") is not None:
@@ -227,6 +242,8 @@ def listing(db: Database, view: str = "open", on: date | None = None) -> dict:
         raise ReminderError(f"view must be one of {VIEWS}")
     sync_expiry(db, on)
     sync_reserves(db, on)
+    sync_credits(db, on)
+    sync_bills(db, on)
     rows = [_decorate(db, r, on) for r in db.all("SELECT * FROM reminders ORDER BY due_date, id")]
     counts = {k: sum(1 for r in rows if r["state"] == k) for k in ("upcoming", "later", "overdue", "snoozed", "done")}
     if view == "open":
@@ -248,6 +265,8 @@ def badge(db: Database, on: date | None = None, rows: list | None = None) -> int
     if rows is None:
         sync_expiry(db, on)
         sync_reserves(db, on)
+        sync_credits(db, on)
+        sync_bills(db, on)
     rows = rows if rows is not None else [_decorate(db, r, on) for r in db.all("SELECT * FROM reminders WHERE status='open'")]
     return sum(1 for r in rows if r["state"] in ("overdue", "upcoming"))
 
@@ -313,6 +332,17 @@ def mark_paid(db: Database, rid: int, body: dict) -> dict:
         raise ReminderError("A card expiry reminder has no payment: confirm the card and its scheduled payments, or press Done")
     if r["kind"] == "reserve":
         raise ReminderError("Check out the reserve instead (Reserves → Check out): record the final bill, the refund or the part kept")
+    if r["kind"] == "credit":
+        raise ReminderError("A credit is not a payment: record its use instead (Credits → Use), or press Done")
+    if r["kind"] == "bill":  # the bill is the source of truth: marking it paid completes this reminder
+        from . import bills
+        try:
+            b = bills.mark_paid(db, r["bill_id"], {**body, "date": str(body.get("date") or "")[:10] or None})
+        except KeyError:
+            raise ReminderError("This bill was deleted")
+        out = get(db, rid)
+        out["transaction"] = b.get("transaction")
+        return out
     tx = None
     if body.get("create_payment"):
         amount = body.get("amount")
@@ -357,7 +387,7 @@ def digest(db: Database, days: int = 7, include_overdue: bool = True, lang: str 
     rows = listing(db, "open", on)["items"]  # 'open' already excludes items before their lead window
     # card expiry reminders are listed during their whole lead window (default 60 days), not only the next `days`
     items = [r for r in rows if (r["state"] == "overdue" and include_overdue) or
-             (r["state"] == "upcoming" and r["days_left"] is not None and (r["days_left"] <= days or r["kind"] == "card_expiry"))]
+             (r["state"] == "upcoming" and r["days_left"] is not None and (r["days_left"] <= days or r["kind"] in ("card_expiry", "credit")))]
     from .ingest import fmt_money
     lines = []
     for r in items:
@@ -368,6 +398,10 @@ def digest(db: Database, days: int = 7, include_overdue: bool = True, lang: str 
         if r["kind"] == "reserve":
             r["detail"] = reserve_text(r, zh)
             lines.append(f"{'⚠️ ' if r['state'] == 'overdue' else ''}🔒 {r['detail']}")
+            continue
+        if r["kind"] == "credit":
+            r["detail"] = credit_text(r, zh)
+            lines.append(f"{'⚠️ ' if r['state'] == 'overdue' else ''}🎟 {r['detail']}")
             continue
         amt = r["remaining"] if r["remaining"] is not None else r["statement_amount"]
         due = _d(r["due_date"])
@@ -385,7 +419,8 @@ def digest(db: Database, days: int = 7, include_overdue: bool = True, lang: str 
     return {"count": n, "title": title, "message": msg, "items": [
         {k: r.get(k) for k in ("id", "kind", "title", "due_date", "days_left", "state", "statement_amount", "remaining",
                                "currency", "account_name", "account_last4", "expiry", "expiry_label", "pending_names",
-                               "card_confirmed", "new_expiry_label", "detail", "reserve_id", "reserve_method", "reserve_end", "reserve_start")} for r in items], "today": on.isoformat()}
+                               "card_confirmed", "new_expiry_label", "detail", "reserve_id", "reserve_method", "reserve_end", "reserve_start",
+                               "credit_id", "credit_source", "credit_state", "bill_id", "payee")} for r in items], "today": on.isoformat()}
 
 
 _TW = (("已于", "已於"), ("将于", "將於"), ("请更新以下定期付款的卡", "請更新以下定期付款的卡"),
@@ -781,3 +816,146 @@ def sync_reserves(db: Database, on: date | None = None) -> None:
     on = on or today(db)
     refresh_reserves(db, on)
     generate_reserves(db, on)
+
+
+# ---------------------------------------------------------------- expiring credits 抵用金
+# One 'credit' reminder per open credit with money left (reminders.credit_id, unique), due on its expiry date and shown
+# from credit_expiry_lead_months (default 6) months before (lead_days computed per expiry). After the expiry date it is
+# overdue = "expired" until Done / the credit is used or closed. It completes by itself when the credit is used up or
+# voided, is dismissed when the credit is deleted, and comes back when the credit is reopened or a use is undone.
+_TW_CRED = (("将于", "將於"), ("已于", "已於"), ("过期", "過期"), ("剩余", "剩餘"), ("奖励", "獎勵"), ("退款", "退款"))
+
+
+def credit_info(db: Database, r: dict) -> dict:
+    from . import credits
+    try:
+        c = credits.get(db, r["credit_id"], with_uses=False)
+    except KeyError:
+        return {"credit_state": "deleted"}
+    return {"credit_state": c["state"], "credit_source": c["source"], "remaining": c["remaining"],
+            "statement_amount": c["amount"], "title": c["label"], "currency": c["currency"], "account_name": c.get("account_name")}
+
+
+def credit_text(r: dict, zh: bool, tw: bool = False) -> str:
+    """One line for a credit reminder (Telegram / email / iPhone notify); tw = Traditional Chinese (emails)."""
+    from .ingest import fmt_money
+    amt = fmt_money(r["remaining"], r["currency"]) if r.get("remaining") is not None else ""
+    past = r.get("state") == "overdue" or r.get("credit_state") == "expired"
+    acct = f" · {r['account_name']}" if r.get("account_name") else ""
+    if zh:
+        s = f"{r.get('title') or ''}{acct} · 剩余 {amt} {'已于' if past else '将于'} {r.get('due_date')} 过期"
+        if tw:
+            for a, b in _TW_CRED:
+                s = s.replace(a, b)
+        return s
+    return f"{r.get('title') or ''}{acct} · {amt} left, {'expired' if past else 'expires'} {r.get('due_date')}"
+
+
+def generate_credits(db: Database, on: date | None = None) -> list[int]:
+    """Create the reminder of every open credit with money left and an expiry date (idempotent per credit)."""
+    new = []
+    for c in db.all("SELECT * FROM credits WHERE status='open' AND remaining>0.005 AND expiry_date IS NOT NULL"):
+        from . import credits
+        label = (c.get("title") or "").strip() or f"{credits.SOURCE_LABELS.get(c['source'], (c['source'],))[0]} credit"
+        with db.tx() as con:
+            ex = con.execute("SELECT id, status, due_date, amount, title FROM reminders WHERE kind='credit' AND credit_id=?", (c["id"],)).fetchone()
+            if ex:
+                if ex["status"] == "open" and (ex["due_date"] != c["expiry_date"] or ex["amount"] != c["remaining"] or ex["title"] != label):
+                    con.execute("UPDATE reminders SET due_date=?, amount=?, title=?, currency=?, account_id=?, updated_at=? WHERE id=?",
+                                (c["expiry_date"], c["remaining"], label, c["currency"], c["account_id"], now_iso(), ex["id"]))
+                continue
+            new.append(con.execute("""INSERT INTO reminders(kind, credit_id, account_id, title, due_date, amount, currency, status,
+                created_at, updated_at) VALUES('credit',?,?,?,?,?,?,'open',?,?)""",
+                (c["id"], c["account_id"], label, c["expiry_date"], c["remaining"], c["currency"], now_iso(), now_iso())).lastrowid)
+    return new
+
+
+def refresh_credits(db: Database, on: date | None = None) -> int:
+    n = 0
+    for r in db.all("SELECT * FROM reminders WHERE kind='credit' AND (status='open' OR done_reason LIKE 'credit_%')"):
+        c = db.one("SELECT status, remaining FROM credits WHERE id=?", (r["credit_id"],))
+        live = bool(c and c["status"] == "open" and (c["remaining"] or 0) > 0.005)
+        kw = None
+        if r["status"] == "open":
+            if not c:
+                kw = ("dismissed", "credit_deleted")
+            elif not live:
+                kw = ("done", "credit_" + ("void" if c["status"] == "void" else "used"))
+        elif live and r["done_reason"] != "credit_deleted":
+            with db.tx() as con:
+                con.execute("UPDATE reminders SET status='open', done_reason=NULL, done_at=NULL, notified_at=NULL, updated_at=? WHERE id=?",
+                            (now_iso(), r["id"]))
+            n += 1
+        if kw:
+            with db.tx() as con:
+                con.execute("UPDATE reminders SET status=?, done_reason=?, done_at=?, updated_at=? WHERE id=? AND status='open'",
+                            (kw[0], kw[1], now_iso(), now_iso(), r["id"]))
+            n += 1
+    return n
+
+
+def sync_credits(db: Database, on: date | None = None) -> None:
+    refresh_credits(db, on)
+    generate_credits(db, on)
+
+
+# ---------------------------------------------------------------- email-driven bills 账单待付
+# One 'bill' reminder per open bill (reminders.bill_id, unique), due on the bill's due date (its issue date when the
+# email had none) and shown bills.lead_days / bill_reminder_lead_days (default 3) days before. Mark paid here = mark the
+# bill paid (optionally recording the payment). It completes when the bill is paid (by hand or by a matched payment
+# confirmation email) or cancelled, is dismissed when the bill is deleted and comes back when the bill is reopened.
+def bill_info(db: Database, r: dict) -> dict:
+    b = db.one("SELECT * FROM bills WHERE id=?", (r.get("bill_id"),))
+    if not b:
+        return {"bill_status": "deleted"}
+    return {"bill_status": b["status"], "payee": b["payee"], "remaining": b["amount"], "statement_amount": b["amount"],
+            "currency": b["currency"], "reference": b.get("reference") or r.get("reference"), "bill_has_due": bool(b["due_date"])}
+
+
+def generate_bills(db: Database, on: date | None = None) -> list[int]:
+    new = []
+    for b in db.all("SELECT * FROM bills WHERE status='open'"):
+        due = b["due_date"] or b["issued_date"]
+        title = b["payee"]
+        with db.tx() as con:
+            ex = con.execute("SELECT id, status, due_date, amount, title FROM reminders WHERE kind='bill' AND bill_id=?", (b["id"],)).fetchone()
+            if ex:
+                if ex["status"] == "open" and (ex["due_date"] != due or ex["amount"] != b["amount"] or ex["title"] != title):
+                    con.execute("UPDATE reminders SET due_date=?, amount=?, title=?, currency=?, account_id=?, updated_at=? WHERE id=?",
+                                (due, b["amount"], title, b["currency"], b["account_id"], now_iso(), ex["id"]))
+                continue
+            new.append(con.execute("""INSERT INTO reminders(kind, bill_id, account_id, title, due_date, amount, currency, reference,
+                status, created_at, updated_at) VALUES('bill',?,?,?,?,?,?,?,'open',?,?)""",
+                (b["id"], b["account_id"], title, due, b["amount"], b["currency"], b.get("reference") or None,
+                 now_iso(), now_iso())).lastrowid)
+    return new
+
+
+def refresh_bills(db: Database, on: date | None = None) -> int:
+    n = 0
+    for r in db.all("SELECT * FROM reminders WHERE kind='bill' AND (status='open' OR done_reason LIKE 'bill_%' OR done_reason='paid')"):
+        b = db.one("SELECT status, transaction_id FROM bills WHERE id=?", (r["bill_id"],))
+        kw = None
+        if r["status"] == "open":
+            if not b:
+                kw = ("dismissed", "bill_deleted", None)
+            elif b["status"] == "paid":
+                kw = ("done", "paid", b["transaction_id"])
+            elif b["status"] == "cancelled":
+                kw = ("done", "bill_cancelled", None)
+        elif b and b["status"] == "open" and r["done_reason"] != "bill_deleted":
+            with db.tx() as con:
+                con.execute("UPDATE reminders SET status='open', done_reason=NULL, done_at=NULL, notified_at=NULL, transaction_id=NULL, "
+                            "updated_at=? WHERE id=?", (now_iso(), r["id"]))
+            n += 1
+        if kw:
+            with db.tx() as con:
+                con.execute("UPDATE reminders SET status=?, done_reason=?, done_at=?, transaction_id=COALESCE(?, transaction_id), updated_at=? "
+                            "WHERE id=? AND status='open'", (kw[0], kw[1], now_iso(), kw[2], now_iso(), r["id"]))
+            n += 1
+    return n
+
+
+def sync_bills(db: Database, on: date | None = None) -> None:
+    refresh_bills(db, on)
+    generate_bills(db, on)

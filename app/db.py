@@ -305,6 +305,12 @@ class Database:
                 out.append("accounts.system_role")
             if "reminders" in tables and "reserve_id" not in {r[1] for r in con.execute("PRAGMA table_info(reminders)")}:
                 out.append("reminders.reserve_id")
+            if "credits" not in tables or "credit_uses" not in tables:
+                out.append("credits")
+            if "bills" not in tables or "bill_payments" not in tables:
+                out.append("bills")
+            if "reminders" in tables and not {"credit_id", "bill_id"} <= {r[1] for r in con.execute("PRAGMA table_info(reminders)")}:
+                out.append("reminders.credit_id+bill_id")
             return out
         finally:
             con.close()
@@ -516,6 +522,51 @@ class Database:
             if "reserve_id" not in {r[1] for r in con.execute("PRAGMA table_info(reminders)")}:
                 con.execute("ALTER TABLE reminders ADD COLUMN reserve_id INTEGER")
             con.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_rem_reserve ON reminders(reserve_id) WHERE kind='reserve'")
+            # Expiring credits 抵用金 (additive): refund / cancellation / bonus credits held on an account with an expiry
+            # date. Memo only (never a transaction); credit_uses logs each (partial) use. Reminder kind 'credit'.
+            con.execute("""CREATE TABLE IF NOT EXISTS credits (
+                id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL, source TEXT NOT NULL, title TEXT DEFAULT '',
+                amount REAL NOT NULL, remaining REAL NOT NULL, currency TEXT NOT NULL, issued_date TEXT NOT NULL,
+                expiry_date TEXT, status TEXT NOT NULL DEFAULT 'open', reference TEXT DEFAULT '', note TEXT DEFAULT '',
+                closed_at TEXT, is_demo INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now','localtime')), updated_at TEXT)""")
+            con.execute("""CREATE TABLE IF NOT EXISTS credit_uses (
+                id INTEGER PRIMARY KEY, credit_id INTEGER NOT NULL, amount REAL NOT NULL, date TEXT NOT NULL,
+                note TEXT DEFAULT '', transaction_id INTEGER, created_at TEXT DEFAULT (datetime('now','localtime')))""")
+            con.execute("CREATE INDEX IF NOT EXISTS ix_credit_acct ON credits(account_id)")
+            con.execute("CREATE INDEX IF NOT EXISTS ix_credit_use ON credit_uses(credit_id)")
+            con.execute("""CREATE TRIGGER IF NOT EXISTS trg_acct_delete_credits AFTER DELETE ON accounts BEGIN
+                DELETE FROM credit_uses WHERE credit_id IN (SELECT id FROM credits WHERE account_id=OLD.id);
+                DELETE FROM credits WHERE account_id=OLD.id; END""")
+            con.execute("""CREATE TRIGGER IF NOT EXISTS trg_tx_delete_credit_use AFTER DELETE ON transactions BEGIN
+                UPDATE credit_uses SET transaction_id=NULL WHERE transaction_id=OLD.id; END""")
+            # Email-driven bills 账单待付 (additive): bill / payment-request emails -> payment tasks (reminder kind 'bill');
+            # bill_payments = payment confirmations, matched to a bill or kept for review (unmatched / ambiguous).
+            con.execute("""CREATE TABLE IF NOT EXISTS bills (
+                id INTEGER PRIMARY KEY, payee TEXT NOT NULL, amount REAL, currency TEXT, due_date TEXT, issued_date TEXT,
+                account_id INTEGER, reference TEXT DEFAULT '', note TEXT DEFAULT '', lead_days INTEGER,
+                status TEXT NOT NULL DEFAULT 'open', source TEXT DEFAULT 'web', message_id TEXT, sender TEXT,
+                sender_domain TEXT, subject TEXT, raw_text TEXT, paid_at TEXT, paid_amount REAL, paid_message_id TEXT,
+                paid_subject TEXT, matched TEXT, transaction_id INTEGER, is_demo INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now','localtime')), updated_at TEXT)""")
+            con.execute("""CREATE TABLE IF NOT EXISTS bill_payments (
+                id INTEGER PRIMARY KEY, message_id TEXT, subject TEXT, payee TEXT, amount REAL, currency TEXT,
+                paid_date TEXT, sender_domain TEXT, reference TEXT, status TEXT NOT NULL DEFAULT 'unmatched',
+                bill_id INTEGER, candidates TEXT DEFAULT '[]', reason TEXT,
+                created_at TEXT DEFAULT (datetime('now','localtime')), updated_at TEXT)""")
+            con.execute("CREATE INDEX IF NOT EXISTS ix_bills_status ON bills(status)")
+            con.execute("CREATE INDEX IF NOT EXISTS ix_billpay_status ON bill_payments(status)")
+            con.execute("""CREATE TRIGGER IF NOT EXISTS trg_acct_delete_bills AFTER DELETE ON accounts BEGIN
+                UPDATE bills SET account_id=NULL WHERE account_id=OLD.id; END""")
+            con.execute("""CREATE TRIGGER IF NOT EXISTS trg_tx_delete_bill AFTER DELETE ON transactions BEGIN
+                UPDATE bills SET transaction_id=NULL WHERE transaction_id=OLD.id; END""")
+            rem_cols = {r[1] for r in con.execute("PRAGMA table_info(reminders)")}
+            if "credit_id" not in rem_cols:
+                con.execute("ALTER TABLE reminders ADD COLUMN credit_id INTEGER")
+            if "bill_id" not in rem_cols:
+                con.execute("ALTER TABLE reminders ADD COLUMN bill_id INTEGER")
+            con.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_rem_credit ON reminders(credit_id) WHERE kind='credit'")
+            con.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_rem_bill ON reminders(bill_id) WHERE kind='bill'")
             # cursor pagination / account history (additive indexes)
             con.execute("CREATE INDEX IF NOT EXISTS ix_tx_date_id ON transactions(date, id)")
             con.execute("CREATE INDEX IF NOT EXISTS ix_tx_acct_date ON transactions(account_id, date, id)")

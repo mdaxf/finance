@@ -438,6 +438,46 @@ def _log(db: Database, **kw):
         con.execute("DELETE FROM ingest_log WHERE id NOT IN (SELECT id FROM ingest_log ORDER BY id DESC LIMIT 2000)")
 
 
+def _ingest_bill(db: Database, ex: dict, sender: str, subject: str, body: str, msg: dict, mid: str, logbase: dict) -> dict | None:
+    """Bill / payment-confirmation emails (see app/bills.py). None = not handled here, continue the normal flow."""
+    from . import bills
+    rule_kind = ex.get("kind") if ex.get("kind") in ("bill", "bill_paid") else None
+    if not rule_kind and ex.get("kind") == "hold":
+        return None
+    try:
+        res = bills.handle_email(db, sender, subject, body, _email_date(msg), mid, rule_kind)
+    except Exception as e:  # noqa: BLE001 - a bill-parsing problem must never lose the email
+        log.warning("bill email handling failed: %s", e)
+        return None
+    if not res:
+        return None
+    p = {k: v for k, v in res["parsed"].items() if k not in ("text",)}
+    if res["type"] == "bill":
+        if res["action"] == "skipped":
+            if rule_kind:
+                _log(db, **logbase, result="skipped", detail="bill: " + res["reason"], rule_name=ex.get("rule_name"))
+                return {"created": False, "result": "skipped", "reason": "bill: " + res["reason"], "message_id": mid}
+            return None
+        b = res["bill"]
+        due = f", due {b['due_date']}" if b.get("due_date") else ", no due date found"
+        amt = f" {fmt_money(b['amount'], b['currency'])}" if b.get("amount") is not None else " (amount not found)"
+        what = "bill task created" if res["action"] == "created" else "bill already scheduled"
+        _log(db, **logbase, result="bill", detail=f"{what}: {b['payee']}{amt}{due}", rule_name=ex.get("rule_name"))
+        return {"created": res["action"] == "created", "result": "bill", "action": res["action"], "bill": b, "extracted": p}
+    # payment confirmation
+    if res["action"] == "matched":
+        b = res["bill"]
+        _log(db, **logbase, result="bill_paid", detail=f"bill #{b['id']} {b['payee']} marked paid", rule_name=ex.get("rule_name"))
+        return {"created": False, "result": "bill_paid", "bill": b, "extracted": p}
+    why = f"payment {res['action']} ({res.get('reason') or ''}) → Bills → Payments to review"
+    if rule_kind:
+        _log(db, **logbase, result="review", detail=why, rule_name=ex.get("rule_name"))
+        return {"created": False, "result": "bill_review", "action": res["action"], "payment_id": res["payment_id"],
+                "candidates": res["candidates"], "extracted": p}
+    ex["bill_note"] = why
+    return None
+
+
 def _email_date(msg: dict) -> str | None:
     if not msg.get("received_at"):
         return None
@@ -535,6 +575,14 @@ def ingest_email(db: Database, msg: dict, mailbox: dict | None = None, auto_post
     ex = parse_email(sender, subject, body, rules)
     if ex.get("kind") == "balance":  # statement balance -> set-balance adjustment
         return _ingest_balance(db, ex, msg, mid, logbase, mailbox, auto_post, source)
+    # bills 账单待付: a bill / payment request -> a payment task + reminder (no transaction); a payment confirmation ->
+    # the matching open bill is marked paid. Unmatched / ambiguous confirmations are kept for review and then go on
+    # through the normal flow below (e.g. a card payment still lands in To review as a transfer).
+    bill_res = _ingest_bill(db, ex, sender, subject, body, msg, mid, logbase)
+    if bill_res is not None:
+        return bill_res
+    if ex.get("kind") in ("bill", "bill_paid"):
+        ex["kind"] = "payment" if ex["kind"] == "bill_paid" else "expense"
     text = ex["text"]
     if ex.get("amount") is None:
         # maybe a plain "lunch 25 alipay" note mailed to the inbox
@@ -552,6 +600,8 @@ def ingest_email(db: Database, msg: dict, mailbox: dict | None = None, auto_post
     reasons = [f"amount {ex['amount']}"]
     if ex.get("rule_name"):
         conf += 0.1; reasons.append(f"rule {ex['rule_name']}")
+    if ex.get("bill_note"):
+        reasons.append(ex["bill_note"])
     accounts = db.all("SELECT * FROM accounts WHERE archived=0")
     account_id = None
     if ex.get("last4"):

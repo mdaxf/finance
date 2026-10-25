@@ -25,6 +25,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from . import backup as bk
 from . import agent_api, config, demo, email_reports, mailer, offsite, importers, ingest, ledger, plan_lines, taxtips, principal, projects, quotes, receipts, reimburse, reminders, reconcile, reserves, returns, schedules
+from . import bills, credits
 from .db import ACCOUNT_TYPES, BASE_DIR, Database, now_iso
 from .email_rules import parse_email
 
@@ -174,12 +175,15 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
                     "backup_interval_hours", "backup_keep", "schedule_run_time", "schedule_catchup_days", "timezone",
                     "lock_reconciled", "receipts_dir", "receipts_pattern",
                     "reminder_lead_days", "reminder_notify", "backup_dir", "backup_receipts", "card_expiry_lead_days",
-                    "reserve_release_days", "reserve_hold_days"]
+                    "reserve_release_days", "reserve_hold_days", "credit_expiry_lead_months", "bill_reminder_lead_days",
+                    "bill_match_tolerance", "bill_match_days"]
     SETTING_DEFAULTS = {"schedule_run_time": "00:15", "schedule_catchup_days": "90", "timezone": schedules.DEFAULT_TZ, "lock_reconciled": "0",
                         "receipts_dir": "", "receipts_pattern": "{yyyy}/{mm}/{dd}",
                         "reminder_lead_days": "10", "reminder_notify": "off", "backup_dir": "", "backup_receipts": "1",
                         "card_expiry_lead_days": str(reminders.EXPIRY_LEAD_DEFAULT),
-                        "reserve_release_days": str(reserves.RELEASE_DAYS_DEFAULT), "reserve_hold_days": str(reserves.HOLD_DAYS_DEFAULT)}
+                        "reserve_release_days": str(reserves.RELEASE_DAYS_DEFAULT), "reserve_hold_days": str(reserves.HOLD_DAYS_DEFAULT),
+                        "credit_expiry_lead_months": str(credits.LEAD_MONTHS_DEFAULT), "bill_reminder_lead_days": str(bills.LEAD_DAYS_DEFAULT),
+                        "bill_match_tolerance": f"{bills.MATCH_TOL_ABS_DEFAULT:.2f}", "bill_match_days": str(bills.MATCH_DAYS_DEFAULT)}
 
     @app.get("/api/meta")
     def meta():
@@ -201,6 +205,8 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
             "review_count": db.one("SELECT COUNT(*) n FROM transactions WHERE status='review'")["n"],
             "reminder_count": reminders.badge(db),
             "reserve_review_count": reserves.review_count(db),
+            "bill_review_count": bills.review_count(db),
+            "credit_expiring_count": len(credits.expiring(db)),
             "has_demo": bool(db.one("SELECT 1 x FROM accounts WHERE is_demo=1 LIMIT 1")),
             "prefs": ledger.get_prefs(db),
             "adj_reasons": [{"code": c, "name": en, "name_zh": zh} for c, en, zh in ledger.ADJ_REASONS],
@@ -265,6 +271,21 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
                         raise HTTPException(400, ("Reserve reminder days after check-out" if k == "reserve_release_days"
                                                   else "Reserve reminder days after check-in") + " must be 0–365")
                     v = str(int(str(v).strip()))
+                if k in ("credit_expiry_lead_months", "bill_reminder_lead_days", "bill_match_days"):
+                    lim = {"credit_expiry_lead_months": (60, "Credit expiry reminder months must be 0–60"),
+                           "bill_reminder_lead_days": (365, "Bill reminder days must be 0–365"),
+                           "bill_match_days": (365, "Payment match days after the due date must be 0–365")}[k]
+                    if not str(v).strip().isdigit() or not 0 <= int(str(v).strip()) <= lim[0]:
+                        raise HTTPException(400, lim[1])
+                    v = str(int(str(v).strip()))
+                if k == "bill_match_tolerance":
+                    try:
+                        f = float(str(v).strip())
+                    except ValueError:
+                        f = -1
+                    if not 0 <= f <= 1000:
+                        raise HTTPException(400, "Payment match tolerance must be 0–1000")
+                    v = f"{f:.2f}"
                 if k == "backup_receipts":
                     v = "0" if str(v).lower() in ("0", "false", "off", "no", "") else "1"
                 if k == "receipts_pattern":
@@ -659,6 +680,126 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
             return reimburse.write_off(db, tid, undo=True)
         except ledger.ValidationError as e:
             raise HTTPException(400, str(e))
+
+    # ------------------------------------------------------------ expiring credits 抵用金
+    @app.exception_handler(credits.NotFound)
+    async def _credit_nf(_req, exc):
+        return JSONResponse({"detail": "Credit not found"}, status_code=404)
+
+    @app.get("/api/credits")
+    def credit_list(request: Request):
+        """Credits from refunds / cancellations / bonuses: ?state=active,partial,expired (default) | used | void | all,
+        account_id, source=refund|cancel|bonus, expiring=1, months= (window, default credit_expiry_lead_months)."""
+        return credits.list_credits(db, dict(request.query_params))
+
+    @app.get("/api/credits/expiring")
+    def credit_expiring(months: int | None = None):
+        """Open credits with money left expiring within `months` (default: the setting, 6)."""
+        if months is not None and not 0 <= months <= 60:
+            raise HTTPException(400, "months must be 0–60")
+        return {"months": months if months is not None else credits.lead_months(db), "items": credits.expiring(db, months)}
+
+    @app.post("/api/credits")
+    def credit_create(body: dict = Body(...)):
+        """{account_id, source: refund|cancel|bonus, amount, remaining?, currency?, issued_date?, expiry_date, title?,
+        reference?, note?}. A note only: never a transaction."""
+        return credits.create(db, dict(body or {}))
+
+    @app.get("/api/credits/{cid}")
+    def credit_get(cid: int):
+        return credits.get(db, cid)
+
+    @app.put("/api/credits/{cid}")
+    def credit_update(cid: int, body: dict = Body(...)):
+        return credits.update(db, cid, dict(body or {}))
+
+    @app.delete("/api/credits/{cid}")
+    def credit_delete(cid: int):
+        return credits.delete(db, cid)
+
+    @app.post("/api/credits/{cid}/use")
+    def credit_use(cid: int, body: dict = Body(default={})):
+        """Mark used: {amount?} (blank = all that is left), date?, note?, transaction_id?, force? (an expired credit)."""
+        return credits.use(db, cid, body or {})
+
+    @app.delete("/api/credits/{cid}/uses/{uid}")
+    def credit_undo_use(cid: int, uid: int):
+        return credits.undo_use(db, cid, uid)
+
+    @app.post("/api/credits/{cid}/void")
+    def credit_void(cid: int, body: dict = Body(default={})):
+        """Close what is left (forfeited / not wanted)."""
+        return credits.close(db, cid, (body or {}).get("note"))
+
+    @app.post("/api/credits/{cid}/reopen")
+    def credit_reopen(cid: int):
+        return credits.reopen(db, cid)
+
+    # ------------------------------------------------------------ bills 账单待付 (email-driven payment tasks)
+    @app.exception_handler(bills.NotFound)
+    async def _bill_nf(_req, exc):
+        return JSONResponse({"detail": "Not found"}, status_code=404)
+
+    @app.get("/api/bills")
+    def bill_list(request: Request):
+        """Payment tasks: ?status=open (default) | paid | cancelled | all."""
+        return bills.list_bills(db, dict(request.query_params))
+
+    @app.post("/api/bills")
+    def bill_create(body: dict = Body(...)):
+        """{payee, amount?, currency?, due_date?, issued_date?, account_id?, reference?, note?, lead_days?}."""
+        return bills.create(db, dict(body or {}))
+
+    @app.post("/api/bills/parse")
+    def bill_parse(body: dict = Body(...)):
+        """Dry run: what the bill parser reads from {from, subject, body, received_at?} and which open bills a payment
+        confirmation would match. Nothing is saved."""
+        b = body or {}
+        p = bills.parse_bill_email(b.get("from") or "", b.get("subject") or "", b.get("body") or "", b.get("received_at"))
+        out = {"parsed": p}
+        if p["type"] == "paid":
+            m = bills.match_payment(db, p)
+            out["match"] = {"status": m["status"], "reason": m.get("reason"), "candidates": [c["id"] for c in m["candidates"]]}
+        return out
+
+    @app.get("/api/bills/payments")
+    def bill_payments(status: str = "review"):
+        """Payment confirmations: status=review (unmatched + ambiguous, default) | matched | dismissed | all."""
+        return {"items": bills.list_payments(db, status), "review_count": bills.review_count(db)}
+
+    @app.post("/api/bills/payments/{pid}/match")
+    def bill_payment_match(pid: int, body: dict = Body(...)):
+        """{bill_id}: this confirmation pays that bill (marks it paid)."""
+        return bills.match_manual(db, pid, (body or {}).get("bill_id"))
+
+    @app.post("/api/bills/payments/{pid}/dismiss")
+    def bill_payment_dismiss(pid: int):
+        return bills.dismiss_payment(db, pid)
+
+    @app.get("/api/bills/{bid}")
+    def bill_get(bid: int):
+        return bills.get(db, bid)
+
+    @app.put("/api/bills/{bid}")
+    def bill_update(bid: int, body: dict = Body(...)):
+        return bills.update(db, bid, dict(body or {}))
+
+    @app.delete("/api/bills/{bid}")
+    def bill_delete(bid: int):
+        return bills.delete(db, bid)
+
+    @app.post("/api/bills/{bid}/paid")
+    def bill_paid(bid: int, body: dict = Body(default={})):
+        """Mark paid by hand: {date?, create_payment?, from_account_id?, amount?, category_id?}."""
+        return bills.mark_paid(db, bid, body or {})
+
+    @app.post("/api/bills/{bid}/cancel")
+    def bill_cancel(bid: int):
+        return bills.cancel(db, bid)
+
+    @app.post("/api/bills/{bid}/reopen")
+    def bill_reopen(bid: int):
+        return bills.reopen(db, bid)
 
     # ------------------------------------------------------------ reserves 押金/预授权
     @app.exception_handler(reserves.NotFound)

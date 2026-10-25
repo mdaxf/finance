@@ -152,6 +152,10 @@ def build(db: Database, kind: str, today: date | None = None, lng: str | None = 
             title = "💳 " + reminders.expiry_text(r, zh, lang(db, lng) == "zh-TW")
         if r["kind"] == "reserve":  # hold not released / deposit not refunded
             title = "🔒 " + reminders.reserve_text(r, zh, lang(db, lng) == "zh-TW")
+        if r["kind"] == "credit":  # credit (refund / cancellation / bonus) about to expire or expired
+            title = "🎟 " + reminders.credit_text(r, zh, lang(db, lng) == "zh-TW")
+        if r["kind"] == "bill":  # bill / payment request from an email
+            title = "🧾 " + title
         due_rows.append([r["due_date"] or "", title, when, _money(amt, r["currency"]) if amt else ""])
     if kind == "reminders":
         subject = f"⏰ {L['subject_rem'].format(n=len(due))}"
