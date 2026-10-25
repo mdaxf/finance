@@ -217,6 +217,7 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
             "reserve_review_count": reserves.review_count(db),
             "bill_review_count": bills.review_count(db),
             "credit_expiring_count": len(credits.expiring(db)),
+            "credit_expired_count": credits.list_credits(db, {"state": "expired"})["expired_count"],
             "has_demo": bool(db.one("SELECT 1 x FROM accounts WHERE is_demo=1 LIMIT 1")),
             "prefs": ledger.get_prefs(db),
             "adj_reasons": [{"code": c, "name": en, "name_zh": zh} for c, en, zh in ledger.ADJ_REASONS],

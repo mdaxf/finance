@@ -1216,6 +1216,8 @@ i18nAdd("zh-TW", "繁體中文", {
 "{n} days left": "剩 {n} 天",
 "{n} days overdue": "逾期 {n} 天",
 "{n} days past the reminder date": "已過提醒日期 {n} 天",
+"{n} expired": "{n} 筆已過期",
+"{n} expiring soon": "{n} 筆即將過期",
 "{n} linked": "已關聯 {n} 筆",
 "{n} payment(s) to update": "{n} 筆付款待換卡",
 "{n} payments": "{n} 期",
