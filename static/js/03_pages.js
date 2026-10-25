@@ -558,7 +558,27 @@ function upcomingList(items, {compact = false} = {}) {
   if (!items.length) return '<div class="empty">Nothing scheduled in the next 30 days</div>';
   return `<table class="t upcoming">${items.map(u => `<tr><td class="nowrap small">${esc(u.date.slice(5, 10))} <span class="muted">${esc(u.date.slice(11))}</span></td>
     <td><b>${esc(u.name)}</b><div class="small muted">${esc(kindLabel[u.kind] || u.kind)} · ${esc(u.account_name || '')}${u.to_account_name ? ' → ' + esc(u.to_account_name) : ''}${u.post_mode === 'review' ? ' · <span class="pill">to review</span>' : ''}</div></td>
-    <td class="right nowrap ${u.kind === 'income' ? 'pos' : u.kind === 'expense' ? 'neg' : ''}">${u.amount != null ? money(u.amount, u.currency) : '<span class="muted">variable</span>'}${u.variable_amount && u.amount != null ? '<div class="small muted">≈ variable</div>' : ''}</td></tr>`).join('')}</table>`;
+    <td class="right nowrap ${u.kind === 'income' ? 'pos' : u.kind === 'expense' ? 'neg' : ''}">${u.amount != null ? money(u.amount, u.currency) : '<span class="muted">variable</span>'}${u.variable_amount && u.amount != null ? '<div class="small muted">≈ variable</div>' : ''}</td>
+    <td class="right">${schedPostBtn(u.schedule_id, u.date)}</td></tr>`).join('')}</table>`;
+}
+/* ✓ Post: record one occurrence now (early or late) with the schedule's transaction and mark it done; a recurring
+   schedule carries on with its next date. Used by the upcoming lists (Scheduled, Dashboard) and each schedule's Next. */
+const schedPostBtn = (sid, date) => `<button class="btn sm" data-upost="${sid}" data-occ="${esc(String(date).slice(0, 10))}" title="Post this one now and mark it done">✓ Post</button>`;
+document.addEventListener('click', e => { const b = e.target.closest && e.target.closest('[data-upost]'); if (b) { e.preventDefault(); schedPost(+b.dataset.upost, b.dataset.occ); } });
+async function schedPost(sid, occ) {
+  const s = await guard(() => api('/api/schedules/' + sid)), tp = s.template;
+  const bg = modal('Post now', `<form class="form" id="spF" autocomplete="off">
+    <div class="f full small muted">${esc(s.name)} · due ${esc(occ)}${s.freq === 'once' ? '' : ' · the schedule continues with the next date'}${s.loan_id ? '<br>🤝 Split into principal and interest by the Loan Center' : ''}</div>
+    <label class="f"><span>Amount (${esc(s.currency || '')})</span><input name="amount" type="number" step="0.01" value="${tp.amount ?? ''}" required></label>
+    <label class="f"><span>Date</span><input name="date" type="date" value="${today()}"></label>
+    <label class="f"><span>Account</span><select name="account_id">${acctOptions(tp.account_id ? +tp.account_id : null)}</select></label></form>`,
+    {buttons: '<button class="btn" data-x2>Cancel</button><button class="btn pri" data-ok>✓ Post</button>'});
+  const f = $('#spF', bg); $('[data-x2]', bg).onclick = bg.close;
+  $('[data-ok]', bg).onclick = async () => {
+    if (!f.reportValidity()) return;
+    await guard(() => api(`/api/schedules/${sid}/post`, {method: 'POST', body: {occurrence_date: occ, amount: f.amount.value, date: f.date.value, account_id: f.account_id.value || null}}));
+    bg.close(); toast('Posted · ' + occ + ' marked done'); await loadMeta(); route();
+  };
 }
 VIEWS.scheduled = async (v) => {
   const d = await api('/api/schedules');
@@ -574,7 +594,7 @@ VIEWS.scheduled = async (v) => {
    ${d.items.map(s => `<tr class="${s.enabled ? '' : 'paused'}"><td><b>${esc(s.name)}</b><div class="small muted">${esc(kindLabel[s.template.kind] || s.template.kind)}${s.post_mode === 'remind' ? ' · <span class="pill">⏰ remind only</span>' : s.post_mode === 'review' || s.variable_amount ? ' · <span class="pill">to review</span>' : ' · auto-post'}${s.enabled ? '' : ' · <span class="pill warn">paused</span>'}${s.finished ? ' · <span class="pill">ended</span>' : ''}</div></td>
      <td class="small">${esc(s.description)}</td><td class="small">${esc(s.account_name || '')}${s.to_account_name ? ' → ' + esc(s.to_account_name) : ''}</td>
      <td class="right nowrap">${s.template.amount != null ? money(s.template.amount, s.currency) : '<span class="muted">variable</span>'}${s.variable_amount ? '<div class="small muted">variable</div>' : ''}</td>
-     <td class="small nowrap">${s.next_dates[0] ? esc(s.next_dates[0]) : '<span class="muted">—</span>'}</td><td class="right small hide-m"><a href="#/transactions/?source=scheduled">${s.generated_count}</a>${s.last_generated ? `<div class="muted">last ${esc(s.last_generated)}</div>` : ''}</td>
+     <td class="small nowrap">${s.next_dates[0] ? esc(s.next_dates[0]) + (s.enabled ? ' ' + schedPostBtn(s.id, s.next_dates[0]) : '') : '<span class="muted">—</span>'}</td><td class="right small hide-m"><a href="#/transactions/?source=scheduled">${s.generated_count}</a>${s.last_generated ? `<div class="muted">last ${esc(s.last_generated)}</div>` : ''}</td>
      <td class="nowrap"><button class="btn sm" data-se="${s.id}">Edit</button> <button class="btn sm" data-sp="${s.id}" data-on="${s.enabled}">${s.enabled ? '⏸ Pause' : '▶ Resume'}</button> <button class="btn sm danger" data-sd="${s.id}">✕</button></td></tr>`).join('')}</tbody></table></div>`
    : '<div class="empty">No schedules yet. Create one here, or open any transaction and press <b>🔁 Make recurring</b>.</div>'}</div>`;
   const byId = Object.fromEntries(d.items.map(s => [s.id, s]));

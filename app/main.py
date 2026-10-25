@@ -1743,6 +1743,11 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
     def upd_schedule(sid: int, body: dict = Body(...)):
         return _sched_err(lambda: schedules.save(db, body, sid))
 
+    @app.post("/api/schedules/{sid}/post")
+    def post_schedule_occurrence(sid: int, body: dict = Body(...)):
+        """Post one occurrence now (early or late) and mark it done; the schedule carries on."""
+        return _sched_err(lambda: schedules.post_occurrence(db, sid, body or {}))
+
     @app.post("/api/schedules/{sid}/pause")
     def pause_schedule(sid: int):
         return _sched_err(lambda: schedules.set_enabled(db, sid, False))

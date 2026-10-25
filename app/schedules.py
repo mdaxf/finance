@@ -464,6 +464,58 @@ def _generate(db: Database, s: dict, tpl: dict, d: date, review: bool) -> dict:
     return {"transaction_id": tid, "status": tx["status"], "warning": warning}
 
 
+def post_occurrence(db: Database, sid: int, body: dict, check: bool = True) -> dict:
+    """Post one occurrence now ("✓ Post" on Scheduled, "Paid" on a schedule reminder), early or late.
+    body: occurrence_date (required), amount (default: the template's; required when variable), date (the
+    transaction's date, default today), account_id (default: the template's). The occurrence is recorded as done,
+    so the daily run never posts it again; an open reminder for it is closed. A recurring schedule carries on.
+    Loan schedules record the split repayment (principal transfer + interest …) for that due date."""
+    s = get(db, sid)
+    if not s:
+        raise KeyError(sid)
+    occ = _d(body.get("occurrence_date"))
+    if not occ:
+        raise ScheduleError("occurrence_date is required")
+    if check and occ not in set(iter_occurrences(s, occ)):
+        raise ScheduleError(f"{occ} is not a date of this schedule")
+    row = db.one("SELECT transaction_id FROM schedule_occurrences WHERE schedule_id=? AND occurrence_date=?", (sid, occ.isoformat()))
+    if row and row["transaction_id"]:
+        raise ScheduleError(f"The {occ} occurrence is already posted")
+    tpl = s["template"]
+    amount = body.get("amount")
+    amount = tpl.get("amount") if amount in (None, "") else amount
+    try:
+        amount = float(amount)
+    except (TypeError, ValueError):
+        raise ScheduleError("Enter the amount")
+    when = str(body.get("date") or local_today(db).isoformat()).replace("T", " ").strip()
+    if len(when) == 10:
+        _d(when)
+        when = f"{when} {s['time_of_day']}"
+    acct = int(body["account_id"]) if body.get("account_id") not in (None, "") else None
+    loan_payment = None
+    if s.get("loan_id"):
+        from . import loans
+        res = loans.record_payment(db, s["loan_id"], {"amount": amount, "date": when, "account_id": acct, "due_date": occ.isoformat()})
+        loan_payment = res["plan"]
+        tids = [p["transaction_id"] for p in res["plan"] if p.get("transaction_id")]
+    else:
+        data = {**tpl, "amount": amount, "date": when, "source": "scheduled", "raw_text": f"Scheduled: {s['name']}"}
+        if acct:
+            data["account_id"] = acct
+        tids = [ledger.create_tx(db, data)["id"]]
+    first = tids[0] if tids else None
+    with db.tx() as con:
+        for tid in tids:
+            con.execute("UPDATE transactions SET schedule_id=? WHERE id=?", (sid, tid))
+        con.execute("""INSERT INTO schedule_occurrences(schedule_id, occurrence_date, transaction_id) VALUES(?,?,?)
+            ON CONFLICT(schedule_id, occurrence_date) DO UPDATE SET transaction_id=excluded.transaction_id""", (sid, occ.isoformat(), first))
+        con.execute("""UPDATE reminders SET status='done', done_reason='paid', done_at=?, updated_at=?, transaction_id=COALESCE(transaction_id, ?)
+            WHERE kind='schedule' AND schedule_id=? AND occurrence_date=? AND status!='done'""", (now_iso(), now_iso(), first, sid, occ.isoformat()))
+    return {"schedule_id": sid, "occurrence_date": occ.isoformat(), "transaction": ledger.get_tx(db, first) if first else None,
+            "loan_payment": loan_payment}
+
+
 def runs(db: Database, limit: int = 30) -> list[dict]:
     out = db.all("SELECT * FROM schedule_runs ORDER BY id DESC LIMIT ?", (limit,))
     for r in out:
