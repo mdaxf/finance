@@ -696,6 +696,9 @@ def _tx_where(f: dict) -> tuple[str, list]:
         where.append("(" + " OR ".join(x for x in (part, rc) if x) + ")" if (part or rc) else "0=1")
     if f.get("tag"):
         where.append("(',' || t.tags || ',') LIKE ?"); params.append(f"%,{f['tag']},%")
+    if f.get("ids") is not None:  # explicit id list (report drill-down)
+        ids = [int(x) for x in f["ids"]] or [0]
+        where.append(f"t.id IN ({','.join('?' * len(ids))})"); params += ids
     if f.get("start"):
         where.append("t.date >= ?"); params.append(str(f["start"])[:10])
     if f.get("end"):
@@ -994,6 +997,37 @@ def totals(db: Database, start: str, end: str, ledger_id: int | None = None, pro
             "investment_income": 0.0 if project_id else investment_income(db, start, end, ledger_id)["total"]}
 
 
+def _group_keys(r: dict, group_by: str) -> list:
+    if group_by == "category":
+        return [r["parent_id"] or r["category_id"]]
+    if group_by == "subcategory":
+        return [r["category_id"]]
+    if group_by == "month":
+        return [r["date"][:7]]
+    if group_by == "tag":
+        return [t for t in (r["tags"] or "").split(",") if t] or [None]
+    return [r.get(group_by + "_id")]
+
+
+def breakdown_items(db: Database, start: str, end: str, group_by: str, kind: str, key: str | None,
+                    ledger_id: int | None = None, project_id: int | None = None) -> dict:
+    """Drill-down of one breakdown row: the transactions behind it (same rules as breakdown, so they add up).
+    key = the row's key as text ('' = the (none) / Uncategorized row)."""
+    base = db.get_setting("base_currency", "USD"); rates = fx_rates(db)
+    want = "" if key in (None, "None", "null") else str(key)
+    amounts: dict[int, float] = {}
+    for r in _flow_rows(db, start, end, ledger_id, project_id):
+        if kind == "expense" and r["kind"] not in ("expense", "refund") or kind == "income" and r["kind"] != "income":
+            continue
+        if want not in ("" if k is None else str(k) for k in _group_keys(r, group_by)):
+            continue
+        amounts[r["id"]] = amounts.get(r["id"], 0) + convert(r["amount"], r["currency"], base, rates) * (-1 if r["kind"] == "refund" else 1)
+    items, _ = query_tx(db, {"ids": list(amounts), "status": "posted", "limit": 5000}) if amounts else ([], 0)
+    for t in items:
+        t["report_amount"] = round(amounts.get(t["id"], 0), 2)
+    return {"items": items, "count": len(items), "total": round(sum(amounts.values()), 2), "currency": base}
+
+
 def breakdown(db: Database, start: str, end: str, group_by: str = "category", kind: str = "expense",
               ledger_id: int | None = None, project_id: int | None = None, parent_id: int | None = None) -> list[dict]:
     """parent_id: only rows in that top-level category (drill-down; use with group_by='subcategory')."""
@@ -1008,17 +1042,7 @@ def breakdown(db: Database, start: str, end: str, group_by: str = "category", ki
         if kind == "income" and r["kind"] != "income":
             continue
         v = convert(r["amount"], r["currency"], base, rates) * (-1 if r["kind"] == "refund" else 1)
-        if group_by == "category":
-            keys = [r["parent_id"] or r["category_id"]]
-        elif group_by == "subcategory":
-            keys = [r["category_id"]]
-        elif group_by == "month":
-            keys = [r["date"][:7]]
-        elif group_by == "tag":
-            keys = [t for t in (r["tags"] or "").split(",") if t] or [None]
-        else:
-            keys = [r.get(group_by + "_id")]
-        for k in keys:
+        for k in _group_keys(r, group_by):
             sums[k] += v
             counts[k] += 1
     names: dict[Any, str] = {}
