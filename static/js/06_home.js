@@ -52,9 +52,10 @@ VIEWS.home = async (v) => {
       <button type="button" class="btn" id="hqDetail">+ Detailed</button></div>
     <div id="hmRem"></div>
     <div class="card home-list"><div id="hmList" class="hlist"></div></div></div>`;
-  api('/api/reminders?view=open').then(d => { if (d.items.length) $('#hmRem').innerHTML = `<div class="card"><div class="row" style="justify-content:space-between"><b>⏰ Reminders</b><a href="#/reminders" class="small">All 全部 ›</a></div>${d.items.slice(0, 5).map(remLine).join('')}</div>`; }).catch(() => {});
+  api('/api/reminders?view=open').then(d => { if (!v.isConnected) return; if (d.items.length) $('#hmRem').innerHTML = `<div class="card"><div class="row" style="justify-content:space-between"><b>⏰ Reminders</b><a href="#/reminders" class="small">All 全部 ›</a></div>${d.items.slice(0, 5).map(remLine).join('')}</div>`; }).catch(() => {});
   const go = m => { S.homeMonth = m === thisMonth() ? null : m; route(); };
   api(`/api/summary/month?month=${month}${lq}`).then(s => {
+    if (!v.isConnected) return;  // left Home before the totals arrived
     $('#hmPrev').onclick = () => go(s.prev); $('#hmNext').onclick = () => go(s.next);
     const card = (lbl, val, cls, extra = '') => `<div class="card stat"><div class="lbl">${lbl}</div><div class="val ${cls}">${money(val, s.currency)}</div>${extra}</div>`;
     const sc = s.scheduled && s.scheduled.count ? s.scheduled : null, pj = s.projected || {};
