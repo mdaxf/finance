@@ -157,15 +157,39 @@ function typeOptions(selected) { return Object.entries(S.meta.account_types).map
 /* ---------- navigation ---------- */
 const ROUTES = [
   ['home', '🏠', 'Home'], ['dashboard', '📊', 'Dashboard'], ['transactions', '🧾', 'Transactions'], ['accounts', '🏦', 'Accounts'],
-  ['investments', '📈', 'Investments'], ['budgets', '🎯', 'Budgets'], ['scheduled', '🔁', 'Scheduled'], ['reimb', '🧾', 'Reimbursements'], ['reserves', '🔒', 'Reserves'], ['credits', '🎟', 'Credits'], ['bills', '📬', 'Bills'], ['reminders', '⏰', 'Reminders'], ['projects', '📁', 'Projects'], ['reports', '📉', 'Reports'],
+  ['investments', '📈', 'Investments'], ['budgets', '🎯', 'Budgets'], ['scheduled', '🔁', 'Scheduled'], ['reimb', '🧾', 'Reimbursements'], ['reserves', '🔒', 'Reserves'], ['loans', '🤝', 'Loans'], ['credits', '🎟', 'Credits'], ['bills', '📬', 'Bills'], ['reminders', '⏰', 'Reminders'], ['projects', '📁', 'Projects'], ['reports', '📉', 'Reports'],
   ['review', '📥', 'Quick add & Review'], ['settings', '⚙️', 'Settings'],
 ];
+/* menu badges (sidebar, phone More tiles and the ☰ More button): [count, tooltip] per page */
+function navBadges() {
+  const m = S.meta || {}, out = {};
+  const add = (k, n, title) => { if (n) out[k] = [n, title]; };
+  add('review', (m.review_count || 0) + (m.reserve_review_count || 0), '');
+  add('reserves', m.reserve_review_count, 'Holds found in emails to review');
+  add('bills', m.bill_review_count, 'Payments to review');
+  const ce = m.credit_expiring_count || 0, cx = m.credit_expired_count || 0;
+  add('credits', ce + cx, [cx ? t('{n} expired', {n: cx}) : '', ce ? t('{n} expiring soon', {n: ce}) : ''].filter(Boolean).join(' · '));
+  add('reminders', m.reminder_count, '');
+  return out;
+}
+const navBadge = (b, k) => b[k] ? `<span class="badge" title="${esc(b[k][1])}">${b[k][0]}</span>` : '';
+const MOB_NAV = ['home', 'transactions', 'accounts', 'review', 'settings'];
 function renderNav() {
   let cur = (location.hash.slice(2) || 'home').split(/[/?]/)[0]; if (cur === 'account') cur = 'accounts';
-  const rc = S.meta ? S.meta.review_count + (S.meta.reserve_review_count || 0) : 0;
-  $('#nav').innerHTML = ROUTES.map(([k, i, l]) => `<a href="#/${k}" class="${k === cur ? 'active' : ''}"><span class="ico">${i}</span>${l}${k === 'review' && rc ? `<span class="badge">${rc}</span>` : ''}${k === 'reserves' && S.meta && S.meta.reserve_review_count ? `<span class="badge" title="Holds found in emails to review">${S.meta.reserve_review_count}</span>` : ''}${k === 'bills' && S.meta && S.meta.bill_review_count ? `<span class="badge" title="Payments to review">${S.meta.bill_review_count}</span>` : ''}${k === 'credits' && S.meta && S.meta.credit_expiring_count ? `<span class="badge" title="Credits expiring soon">${S.meta.credit_expiring_count}</span>` : ''}${k === 'reminders' && S.meta && S.meta.reminder_count ? `<span class="badge">${S.meta.reminder_count}</span>` : ''}</a>`).join('');
-  const mob = ['home', 'transactions', 'accounts', 'review', 'settings'];
-  $('#mnav').innerHTML = ROUTES.filter(r => mob.includes(r[0])).map(([k, i, l]) => `<a href="#/${k}" class="${k === cur ? 'active' : ''}"><span class="ico">${i}</span>${l.split(' ')[0].replace('Quick', 'Review')}${k === 'review' && rc ? `<span class="badge">${rc}</span>` : ''}</a>`).join('');
+  const b = navBadges();
+  $('#nav').innerHTML = ROUTES.map(([k, i, l]) => `<a href="#/${k}" class="${k === cur ? 'active' : ''}"><span class="ico">${i}</span>${l}${navBadge(b, k)}</a>`).join('');
+  // credits already raise a reminder each, so they only count on the ☰ button when nothing else is waiting
+  const moreBadge = Object.entries(b).filter(([k]) => !MOB_NAV.includes(k) && k !== 'credits').reduce((n, [, v]) => n + v[0], 0) || (b.credits ? b.credits[0] : 0);
+  $('#mnav').innerHTML = ROUTES.filter(r => MOB_NAV.includes(r[0])).map(([k, i, l]) => `<a href="#/${k}" class="${k === cur ? 'active' : ''}"><span class="ico">${i}</span>${l.split(' ')[0].replace('Quick', 'Review')}${k === 'review' ? navBadge(b, k) : ''}</a>`).join('')
+    + `<a href="javascript:void 0" id="mnavMore" class="${MOB_NAV.includes(cur) ? '' : 'active'}"><span class="ico">☰</span>More${moreBadge ? `<span class="badge">${moreBadge}</span>` : ''}</a>`;
+  $('#mnavMore').onclick = mobileMore;
+}
+/* phone: every page that isn't on the bottom bar (Reserves, Investments, Budgets, Reminders, …) */
+function mobileMore() {
+  const cur = (location.hash.slice(2) || 'home').split(/[/?]/)[0], b = navBadges();
+  const bg = modal('More', `<div class="mnav-more">${ROUTES.filter(r => !MOB_NAV.includes(r[0])).map(([k, i, l]) =>
+    `<a href="#/${k}" class="${k === cur ? 'active' : ''}"><span class="ico">${i}</span><span>${l}</span>${navBadge(b, k)}</a>`).join('')}</div>`);
+  $$('.mnav-more a', bg).forEach(a => a.onclick = () => bg.close());
 }
 function renderLedgers() {
   const sel = $('#ledgerSel');

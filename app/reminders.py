@@ -166,6 +166,8 @@ def refresh(db: Database, on: date | None = None) -> int:
 
 def run(db: Database, on: date | None = None, notify: bool = True) -> dict:
     on = on or today(db)
+    from .loans import sync_reminders as sync_loans
+    sync_loans(db, on)
     new = generate_cards(db, on) + generate_expiry(db, on) + generate_reserves(db, on) + generate_credits(db, on) + generate_bills(db, on)
     done = refresh(db, on) + refresh_expiry(db, on) + refresh_reserves(db, on) + refresh_credits(db, on) + refresh_bills(db, on)
     sent = notify_due(db, on) if notify else 0
@@ -200,6 +202,12 @@ def _decorate(db: Database, r: dict, on: date) -> dict:
         r["expired"] = bool(due and due < on)
     if r["kind"] == "reserve":
         r.update(reserve_info(db, r))
+    if r["kind"] == "loan":
+        from .loans import reminder_info
+        r.update(reminder_info(db, r))
+    elif r["kind"] == "schedule" and r.get("schedule_id"):
+        s = db.one("SELECT loan_id FROM schedules WHERE id=?", (r["schedule_id"],))
+        r["loan_id"] = (s or {}).get("loan_id")
     if r["kind"] == "credit":
         r.update(credit_info(db, r))
         r["paid"] = None
@@ -242,6 +250,8 @@ def listing(db: Database, view: str = "open", on: date | None = None) -> dict:
         raise ReminderError(f"view must be one of {VIEWS}")
     sync_expiry(db, on)
     sync_reserves(db, on)
+    from .loans import sync_reminders as sync_loans
+    sync_loans(db, on)
     sync_credits(db, on)
     sync_bills(db, on)
     rows = [_decorate(db, r, on) for r in db.all("SELECT * FROM reminders ORDER BY due_date, id")]
@@ -265,6 +275,8 @@ def badge(db: Database, on: date | None = None, rows: list | None = None) -> int
     if rows is None:
         sync_expiry(db, on)
         sync_reserves(db, on)
+        from .loans import sync_reminders as sync_loans
+        sync_loans(db, on)
         sync_credits(db, on)
         sync_bills(db, on)
     rows = rows if rows is not None else [_decorate(db, r, on) for r in db.all("SELECT * FROM reminders WHERE status='open'")]
@@ -344,6 +356,22 @@ def mark_paid(db: Database, rid: int, body: dict) -> dict:
         out["transaction"] = b.get("transaction")
         return out
     tx = None
+    loan_id = r.get("loan_id") if r["kind"] in ("loan", "schedule") else None
+    if loan_id and body.get("create_payment"):
+        # Loan Center: the repayment is split into principal (transfer) + interest (expense / income)
+        from . import loans
+        pay = {"amount": body.get("amount"), "date": body.get("date"), "account_id": body.get("from_account_id")}
+        if r["kind"] == "schedule":
+            pay["due_date"] = r["occurrence_date"]
+        res = loans.record_payment(db, loan_id, pay)
+        first = res["plan"][0]["transaction_id"] if res["plan"] else None
+        kw = {"status": "done", "done_reason": "paid", "done_at": now_iso()}
+        if first:
+            kw["transaction_id"] = first
+        out = _set(db, rid, **kw)
+        out["transaction"] = ledger.get_tx(db, first) if first else None
+        out["loan_payment"] = res["plan"]
+        return out
     if body.get("create_payment"):
         amount = body.get("amount")
         amount = float(amount) if amount not in (None, "") else (r["remaining"] or r["statement_amount"])

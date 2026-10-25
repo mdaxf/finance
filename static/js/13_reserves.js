@@ -129,14 +129,14 @@ async function openReserve(id, after) {
   $$('[data-a]', bg).forEach(b => b.onclick = act[b.dataset.a]);
 }
 
-/* new / edit; opts: {id, preset, fromReview: transaction id, after} */
+/* new / edit; opts: {id, preset, fromReview: review item id, fromTx: posted expense id (converted in place), after} */
 async function reserveForm(opts = {}) {
   await (S.meta || loadMeta());
   const m = S.meta;
   const x = opts.id ? await guard(() => api('/api/reserves/' + opts.id)) : Object.assign({method: 'hold', start_date: today(), remind: 1}, opts.preset || {});
   const edit = !!opts.id, locked = edit && x.method === 'deposit';
   const accts = a => !a.archived && a.system_role !== 'deposits' || a.id == x.account_id;
-  const bg = modal(edit ? `✎ ${esc(x.label || t('Reserve'))}` : opts.fromReview ? `🔒 ${t('Convert to a reserve')}` : `🔒 ${t('New reserve')}`, `<form class="form" id="rsF" autocomplete="off">
+  const bg = modal(edit ? `✎ ${esc(x.label || t('Reserve'))}` : opts.fromReview || opts.fromTx ? `🔒 ${t('Convert to a reserve')}` : `🔒 ${t('New reserve')}`, `<form class="form" id="rsF" autocomplete="off">
     <div class="full kind-tabs rs-kinds">${Object.entries(RS_METHOD).map(([k, l]) => `<button type="button" data-m="${k}" class="${x.method === k ? 'on' : ''}" ${edit ? 'disabled' : ''}>${k === 'hold' ? '🔒' : '💰'} ${t(l)}</button>`).join('')}</div>
     <div class="full small muted" data-for="hold">${t('A hold (pre-authorization) only reserves part of your credit: no transaction is recorded. Check out with the final bill.')}</div>
     <div class="full small muted" data-for="deposit">${t('A deposit is money that left your account and should come back: it is recorded as a transfer to the Deposits account, not as spending.')}</div>
@@ -153,7 +153,8 @@ async function reserveForm(opts = {}) {
     <label class="f"><span>${t('Confirmation #')}</span><input name="ref" value="${esc(x.ref || '')}"></label>
     <label class="f full"><span>${t('Note')}</span><input name="note" value="${esc(x.note || '')}"></label>
     <label class="chk full"><input type="checkbox" name="remind" ${x.remind ? 'checked' : ''}> ${t('Remind me if it is still open after check-out')}</label>
-    ${locked ? `<div class="full small muted">${t('The amount, currency and account come from the deposit transfer: edit that transaction to change them.')}</div>` : ''}</form>`,
+    ${locked ? `<div class="full small muted">${t('The amount, currency and account come from the deposit transfer: edit that transaction to change them.')}</div>` : ''}
+    ${opts.fromTx ? `<div class="full small muted" data-for="hold">${t('The expense is removed: a hold is not spending.')}</div><div class="full small muted" data-for="deposit">${t('The expense becomes the transfer to the Deposits account (same transaction, receipts kept).')}</div>` : ''}</form>`,
     {buttons: `<button class="btn" data-x2>${t('Cancel')}</button><button class="btn pri" data-ok>${edit ? t('Save') : t('Create')}</button>`});
   const f = $('#rsF', bg); let method = x.method;
   const sync = () => {
@@ -172,7 +173,8 @@ async function reserveForm(opts = {}) {
       category_id: f.category_id.value || null, project_id: f.project_id.value || null, ref: f.ref.value, note: f.note.value, remind: f.remind.checked};
     if (!locked) Object.assign(body, {account_id: +f.account_id.value || null, amount: f.amount.value, currency: f.currency.value});
     if (!edit) { body.method = method; if (!$('#rsPaid', bg).hidden && f.paid_amount.value) body.paid_amount = f.paid_amount.value; }
-    const r = await guard(() => opts.fromReview ? api(`/api/review/${opts.fromReview}/to-reserve`, {method: 'POST', body})
+    const r = await guard(() => opts.fromTx ? api(`/api/transactions/${opts.fromTx}/to-reserve`, {method: 'POST', body})
+      : opts.fromReview ? api(`/api/review/${opts.fromReview}/to-reserve`, {method: 'POST', body})
       : edit ? api('/api/reserves/' + opts.id, {method: 'PUT', body}) : api('/api/reserves', {method: 'POST', body}));
     bg.close(); toast(edit ? t('Saved') : method === 'hold' ? t('Card hold saved — no transaction recorded') : t('Deposit saved — moved to the Deposits account'));
     await loadMeta();
@@ -286,11 +288,17 @@ async function rsLinkDialog(id, after) {
 async function rsTxBox(box, tid, after) {
   const [tx, sg] = await Promise.all([api('/api/transactions/' + tid), api('/api/reserves/suggest?transaction_id=' + tid).catch(() => ({items: []}))]);
   const mine = tx.reserves || [];
-  if (!mine.length && !sg.items.length) return;
+  const canConvert = tx.status === 'posted' && tx.kind === 'expense' && !mine.length;  // e.g. a hotel deposit auto-posted from an email
+  if (!mine.length && !sg.items.length && !canConvert) return;
   box.hidden = false;
   box.innerHTML = `<div class="small"><b>🔒 ${t('Reserves')}</b> ${mine.map(r => `<a href="javascript:void 0" class="pill rs-m" data-ors="${r.id}">${esc(r.title || '#' + r.id)} · ${t(RS_ROLE[r.role] ? RS_ROLE[r.role][1] : r.role)}</a>`).join(' ')}
+    ${canConvert ? `<button type="button" class="btn sm" data-rscv title="${t('Hotel / rental deposit or card hold')}">🔒 ${t('Convert to a reserve')}</button>` : ''}
     ${sg.items.length ? `<select id="rsPick" class="rs-pick"><option value="">${t('Link to a reserve…')}</option>${sg.items.map(r => `<option value="${r.id}" data-role="${r.role}">${esc(r.label)} · ${money(rsOpenAmt(r), r.currency)}</option>`).join('')}</select>` : ''}</div>`;
   $$('[data-ors]', box).forEach(a => a.onclick = () => openReserve(+a.dataset.ors, after));
+  const cv = $('[data-rscv]', box);
+  if (cv) cv.onclick = () => reserveForm({fromTx: tid, after, preset: {account_id: tx.account_id, amount: tx.orig_currency ? tx.orig_amount : tx.amount,
+    currency: tx.orig_currency || tx.currency, merchant: tx.merchant_name || '', start_date: (tx.date || '').slice(0, 10), category_id: tx.category_id,
+    project_id: tx.project_id, note: tx.note || ''}});
   const p = $('#rsPick', box);
   if (p) p.onchange = async () => { if (!p.value) return; await guard(() => api(`/api/reserves/${p.value}/links`, {method: 'POST', body: {transaction_id: tid}})); toast(t('Linked')); rsTxBox(box, tid, after); };
 }

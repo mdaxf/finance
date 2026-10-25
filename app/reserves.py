@@ -801,6 +801,62 @@ def from_review(db: Database, tid: int, body: dict) -> dict:
     return get(db, rid)
 
 
+def from_transaction(db: Database, tid: int, body: dict) -> dict:
+    """Turn a posted expense (e.g. auto-posted from an email alert) into a reserve, in place.
+    hold: the expense goes away (a pre-authorization is not spending), its email id moves to the hold.
+    deposit: the expense becomes the transfer card → Deposits 押金 (same id, receipts, email) and is linked as the
+    deposit. Body overrides the reserve fields (method, title, end_date, …); amount/currency/account come from the
+    transaction for a deposit."""
+    t = db.one("SELECT t.*, m.name merchant_name FROM transactions t LEFT JOIN merchants m ON m.id=t.merchant_id WHERE t.id=?", (tid,))
+    if not t:
+        raise NotFound(tid)
+    if t["status"] == "review":
+        return from_review(db, tid, body)
+    if t["kind"] != "expense":
+        raise ValidationError("Only an expense can be turned into a reserve (link other transactions to a reserve instead)")
+    if db.one("SELECT 1 x FROM reserve_links WHERE transaction_id=?", (tid,)):
+        raise ValidationError("This transaction is already linked to a reserve")
+    if db.one("SELECT 1 x FROM reimb_links WHERE expense_id=? OR receipt_id=?", (tid, tid)):
+        raise ValidationError("This expense is linked to reimbursements: unlink them first")
+    method = str(body.get("method") or "hold").lower()
+    if method not in METHODS:
+        raise ValidationError("method must be hold or deposit")
+    if method == "hold" and db.one("SELECT 1 x FROM reconciled_tx WHERE transaction_id=?", (tid,)):
+        raise ValidationError("This expense is in a reconciled statement, so it was really charged: "
+                              "use a deposit, or undo the reconciliation first")
+    cur, amt = (t["orig_currency"], t["orig_amount"]) if t["orig_currency"] else (t["currency"], t["amount"])
+    data = {"account_id": t["account_id"], "amount": amt, "currency": cur, "merchant": t["merchant_name"],
+            "start_date": (t["date"] or "")[:10], "category_id": t["category_id"], "project_id": t["project_id"],
+            "member_id": t["member_id"], "note": t["note"], "source": t["source"], "ledger_id": t["ledger_id"],
+            "is_demo": t["is_demo"]}
+    if not t["merchant_name"] and t["note"]:
+        data["title"] = str(t["note"]).strip()[:120]
+    data.update({k: v for k, v in (body or {}).items() if v not in (None, "")})
+    if method == "deposit":  # the money really left: the transaction is the deposit, its numbers win
+        data.update(account_id=t["account_id"], amount=amt, currency=cur)
+        data.pop("paid_amount", None)
+    rates, base = fx_rates(db), db.get_setting("base_currency", "USD")
+    demo = bool(data.get("is_demo"))
+    with db.tx() as con:
+        if method == "hold":
+            data.update(external_id=t["external_id"], raw_text=t["raw_text"])
+            rid = _create(con, data, "hold", rates, base, demo)
+            con.execute("UPDATE receipts SET transaction_id=NULL WHERE transaction_id=?", (tid,))
+            con.execute("DELETE FROM transactions WHERE id=?", (tid,))
+        else:
+            dep = deposits_account(con, cur, base, demo)
+            ex = dict(con.execute("SELECT * FROM transactions WHERE id=?", (tid,)).fetchone())
+            tx = normalize_tx(con, {"kind": "transfer", "to_account_id": dep["id"], "category_id": None,
+                                    "to_amount": t["orig_amount"] if t["orig_currency"] == dep["currency"] else None,
+                                    "note": (t["note"] or f"Deposit 押金 · {data.get('title') or t['merchant_name'] or ''}").strip()},
+                              rates, existing=ex)
+            tx["updated_at"] = now_iso()
+            cols = [k for k in TX_FIELDS + ["updated_at"] if k in tx]
+            con.execute(f"UPDATE transactions SET {','.join(c + '=?' for c in cols)} WHERE id=?", [tx[k] for k in cols] + [tid])
+            rid = _create(con, {**data, "deposit_tx_id": tid}, "deposit", rates, base, demo)
+    return get(db, rid)
+
+
 def create_from_email(db: Database, ex: dict, account_id, date_s: str | None, mid: str, subject: str) -> dict:
     """Email alert recognised as a card hold (rule kind 'hold' or authorization wording): a hold reserve that needs
     review (Confirm / It's a real charge)."""

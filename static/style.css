@@ -293,3 +293,13 @@ td.rs-open,div.rs-open{background:none;color:inherit}
 .rs-set{margin-top:12px}.rs-set input{width:64px;display:inline-block}
 .kind-tabs .rs-tab{border-left:1px dashed var(--line)}
 .rs-pick{width:auto;display:inline-block;margin-left:6px}
+/* phone "More ☰" sheet: the pages not on the bottom bar */
+.mnav-more{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.mnav-more a{display:flex;flex-direction:column;align-items:center;gap:4px;padding:12px 4px;border:1px solid var(--line);border-radius:10px;color:inherit;text-align:center;font-size:13px;position:relative}
+.mnav-more a.active{border-color:var(--pri);color:var(--pri)}
+.mnav-more a .ico{font-size:22px}
+.mnav-more .badge{position:absolute;top:4px;right:6px;background:#ff5b45;color:#fff;border-radius:8px;font-size:10px;padding:0 5px}
+/* Loan Center 借贷中心 */
+.ln-d{font-size:11px}.ln-lent{background:#e3f6ee;color:#0f8a5f}.ln-borrowed{background:#fff3dc;color:#9a6200}
+.ln-st-active{background:#e8f0fc;color:#2a5fb0}.ln-st-paid_off{background:#e3f6ee;color:#0f8a5f}.ln-st-closed{background:#eef0f3;color:#5b6b7a}
+.ln-lk{padding-left:4px}.ln-proj td,.ln-proj th{font-variant-numeric:tabular-nums;font-size:13px}.ln-sug .rs-rv-row{margin-bottom:4px}

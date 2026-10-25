@@ -471,3 +471,36 @@ def test_demo_reserves_load_and_clear(client, db):
     assert db.one("SELECT COUNT(*) n FROM reserve_links")["n"] == 0
     assert db.one("SELECT COUNT(*) n FROM reminders WHERE kind='reserve'")["n"] == 0
     assert client.get("/api/accounts").json()["accounts"] == []
+
+
+# posted expense (e.g. auto-posted from an email) → reserve, in place
+def test_posted_expense_converts_to_hold(client):
+    a = setup(client)
+    before = bal(client, a["card"])
+    t = tx(client, kind="expense", account_id=a["card"], amount=300, currency="USD", merchant="Test Hotel", note="pre-auth")
+    assert bal(client, a["card"]) != before
+    r = client.post(f"/api/transactions/{t['id']}/to-reserve", json={"method": "hold", "end_date": TD})
+    assert r.status_code == 200, r.text
+    x = r.json()
+    assert x["method"] == "hold" and x["amount"] == 300 and x["account_id"] == a["card"]
+    assert client.get(f"/api/transactions/{t['id']}").status_code == 404
+    assert bal(client, a["card"]) == before  # a hold is not spending
+
+
+def test_posted_expense_converts_to_deposit_in_place(client):
+    a = setup(client)
+    t = tx(client, kind="expense", account_id=a["chk"], amount=500, currency="USD", merchant="Test Rental")
+    after_spend = bal(client, a["chk"])
+    r = client.post(f"/api/transactions/{t['id']}/to-reserve", json={"method": "deposit", "amount": 1})
+    assert r.status_code == 200, r.text
+    x = r.json()
+    assert x["method"] == "deposit" and x["outstanding"] == 500  # the transaction's amount wins over the body
+    g = client.get(f"/api/transactions/{t['id']}").json()  # same transaction, now the transfer into Deposits
+    assert g["kind"] == "transfer" and g["to_account_id"] == x["deposit_account_id"] and not g.get("category_id")
+    assert [l["transaction_id"] for l in x["links"]] == [t["id"]] and x["links"][0]["role"] == "deposit"
+    assert bal(client, a["chk"]) == after_spend  # money still left checking
+    assert bal(client, x["deposit_account_id"]) == 500
+    # converting twice / non-expenses are refused
+    assert client.post(f"/api/transactions/{t['id']}/to-reserve", json={"method": "deposit"}).status_code == 400
+    inc = tx(client, kind="income", account_id=a["chk"], amount=50)
+    assert client.post(f"/api/transactions/{inc['id']}/to-reserve", json={"method": "hold"}).status_code == 400

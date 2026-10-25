@@ -24,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import backup as bk
-from . import agent_api, config, demo, email_reports, mailer, offsite, importers, ingest, ledger, plan_lines, taxtips, principal, projects, quotes, receipts, reimburse, reminders, reconcile, reserves, returns, schedules
+from . import agent_api, config, demo, email_reports, mailer, offsite, importers, ingest, ledger, loans, plan_lines, taxtips, principal, projects, quotes, receipts, reimburse, reminders, reconcile, reserves, returns, schedules
 from . import bills, credits
 from .db import ACCOUNT_TYPES, BASE_DIR, Database, now_iso
 from .email_rules import parse_email
@@ -72,6 +72,16 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
         # API 'message' texts: ?lang= param > Accept-Language > English (user data is never translated)
         ingest.MSG_LANG.set(ingest.resolve_lang(request.query_params.get("lang"), request.headers.get("accept-language")))
         return await call_next(request)
+
+    @app.middleware("http")
+    async def static_cache_mw(request: Request, call_next):
+        # app code (js / css / locales) is revalidated on every load (cheap 304 via ETag) so a deploy reaches phones
+        # at once; without it Safari / home-screen apps keep running old scripts heuristically
+        resp = await call_next(request)
+        p = request.url.path
+        if p.startswith("/static/") and not p.startswith("/static/vendor/") and p.endswith((".js", ".css")):
+            resp.headers["Cache-Control"] = "no-cache"
+        return resp
 
     # ------------------------------------------------------------ auth middleware
     @app.middleware("http")
@@ -207,6 +217,7 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
             "reserve_review_count": reserves.review_count(db),
             "bill_review_count": bills.review_count(db),
             "credit_expiring_count": len(credits.expiring(db)),
+            "credit_expired_count": credits.list_credits(db, {"state": "expired"})["expired_count"],
             "has_demo": bool(db.one("SELECT 1 x FROM accounts WHERE is_demo=1 LIMIT 1")),
             "prefs": ledger.get_prefs(db),
             "adj_reasons": [{"code": c, "name": en, "name_zh": zh} for c, en, zh in ledger.ADJ_REASONS],
@@ -490,6 +501,9 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
 
     @app.delete("/api/accounts/{aid}")
     def delete_account(aid: int, force: bool = False):
+        ln = db.one("SELECT name, counterparty FROM loans WHERE account_id=? LIMIT 1", (aid,))
+        if ln:
+            raise HTTPException(400, f"This account belongs to the loan '{ln['name'] or ln['counterparty']}': delete the loan in the Loan Center first.")
         n = db.one("SELECT COUNT(*) n FROM transactions WHERE account_id=? OR to_account_id=?", (aid, aid))["n"]
         if n and not force:
             raise HTTPException(400, f"Account has {n} transactions. Archive it instead, or delete with force=true (deletes them too).")
@@ -886,6 +900,107 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
     def review_to_reserve(tid: int, body: dict = Body(default={})):
         """Convert a To-review item into a reserve ({method: hold|deposit, end_date?, …})."""
         return reserves.from_review(db, tid, body or {})
+
+    # ------------------------------------------------------------ Loan Center 借贷中心
+    @app.exception_handler(loans.NotFound)
+    async def _loan_nf(_req, exc):
+        return JSONResponse({"detail": "Loan not found"}, status_code=404)
+
+    @app.get("/api/loans")
+    def loan_list(request: Request):
+        """Loans lent / borrowed with totals. ?state=active (default) | paid_off | closed | all, ?direction=lent|borrowed."""
+        return loans.list_loans(db, dict(request.query_params))
+
+    @app.post("/api/loans")
+    def loan_create(body: dict = Body(...)):
+        """{direction: lent|borrowed, counterparty, principal, pay_account_id, account_id? (existing account: tracked
+        from its balance), disburse?, rate?, freq?, first_due?, term?, payment?, escrow?, maturity_date?, …}."""
+        return loans.create(db, body or {})
+
+    @app.get("/api/loans/export.csv")
+    def loan_export():
+        import csv, io
+        rows = loans.export_rows(db)
+        buf = io.StringIO()
+        if rows:
+            w = csv.DictWriter(buf, fieldnames=list(rows[0]))
+            w.writeheader(); w.writerows(rows)
+        return Response(buf.getvalue(), media_type="text/csv",
+                        headers={"Content-Disposition": f'attachment; filename="loans-{date.today()}.csv"'})
+
+    @app.get("/api/loans/suggest")
+    def loan_suggest(transaction_id: int | None = None, loan_id: int | None = None, limit: int = 30):
+        """?transaction_id= → loans it could be a repayment of; ?loan_id= → transactions that look like its repayments."""
+        return loans.suggest(db, transaction_id, loan_id, max(1, min(limit, 200)))
+
+    @app.get("/api/loans/{lid}")
+    def loan_get(lid: int):
+        return loans.get(db, lid)
+
+    @app.put("/api/loans/{lid}")
+    def loan_update(lid: int, body: dict = Body(...)):
+        return loans.update(db, lid, body or {})
+
+    @app.delete("/api/loans/{lid}")
+    def loan_delete(lid: int, unlink: bool = False):
+        return loans.delete(db, lid, unlink)
+
+    @app.get("/api/loans/{lid}/split")
+    def loan_split(lid: int, amount: float | None = None, date_: str | None = Query(None, alias="date"), extra: bool = False):
+        """Default principal / interest / escrow split of a repayment of `amount` (blank = the next expected payment)."""
+        return loans.preview_split(db, lid, amount, date_, extra)
+
+    @app.post("/api/loans/{lid}/payments")
+    def loan_pay(lid: int, body: dict = Body(...)):
+        """Record a repayment split into linked transactions ({amount?, principal?, interest?, escrow?, fee?, date?,
+        account_id?, due_date?, extra?, transaction_id? (convert that transaction in place), dry_run?})."""
+        return loans.record_payment(db, lid, body or {})
+
+    @app.post("/api/loans/{lid}/disburse")
+    def loan_disburse(lid: int, body: dict = Body(...)):
+        return loans.disburse(db, lid, body or {})
+
+    @app.post("/api/loans/{lid}/links")
+    def loan_link(lid: int, body: dict = Body(...)):
+        """Link existing transactions as one repayment: {items: [{transaction_id, role?}], due_date?, extra?}."""
+        return loans.link(db, lid, body or {})
+
+    @app.delete("/api/loans/links/{link_id}")
+    def loan_unlink(link_id: int):
+        return loans.unlink(db, link_id)
+
+    @app.delete("/api/loans/events/{eid}")
+    def loan_event_delete(eid: int, delete_transactions: bool = False):
+        """Undo a repayment: unlink its transactions (default) or delete them too."""
+        return loans.delete_event(db, eid, delete_transactions)
+
+    @app.post("/api/loans/{lid}/close")
+    def loan_close(lid: int, body: dict = Body(default={})):
+        """{action: close|reopen, write_off?, category_id?, date?, note?}."""
+        return loans.close(db, lid, body or {})
+
+    @app.post("/api/loans/{lid}/schedule")
+    def loan_schedule(lid: int, body: dict = Body(default={})):
+        """Recurring schedule for the repayments: {post_mode: post|remind, start_date?, time_of_day?, lead_days?,
+        adopt_schedule_id? (an existing schedule for this payment, paused and replaced)}."""
+        return loans.setup_schedule(db, lid, body or {})
+
+    @app.delete("/api/loans/{lid}/schedule")
+    def loan_schedule_delete(lid: int):
+        return loans.remove_schedule(db, lid)
+
+    @app.post("/api/transactions/{tid}/to-loan-payment")
+    def tx_to_loan(tid: int, body: dict = Body(...)):
+        """Turn a transaction into a loan repayment in place ({loan_id, principal?, interest?, …}); the other parts are added."""
+        if not (body or {}).get("loan_id"):
+            raise HTTPException(400, "loan_id is required")
+        return loans.record_payment(db, int(body["loan_id"]), {**body, "transaction_id": tid})
+
+    @app.post("/api/transactions/{tid}/to-reserve")
+    def tx_to_reserve(tid: int, body: dict = Body(default={})):
+        """Turn a posted expense into a reserve in place ({method: hold|deposit, end_date?, …}): a hold removes the
+        expense; a deposit turns it into the transfer to Deposits 押金 and links it."""
+        return reserves.from_transaction(db, tid, body or {})
 
     @app.get("/api/transactions/export.csv")
     def export_tx(request: Request):
