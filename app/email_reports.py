@@ -154,6 +154,9 @@ def build(db: Database, kind: str, today: date | None = None, lng: str | None = 
             title = "🔒 " + reminders.reserve_text(r, zh, lang(db, lng) == "zh-TW")
         if r["kind"] == "credit":  # credit (refund / cancellation / bonus) about to expire or expired
             title = "🎟 " + reminders.credit_text(r, zh, lang(db, lng) == "zh-TW")
+        if r["kind"] == "reward":  # miles / points about to expire
+            from .rewards import reminder_text
+            title = (r.get("reward_icon") or "⭐") + " " + reminder_text(r, zh, lang(db, lng) == "zh-TW")
         if r["kind"] == "bill":  # bill / payment request from an email
             title = "🧾 " + title
         due_rows.append([r["due_date"] or "", title, when, _money(amt, r["currency"]) if amt else ""])

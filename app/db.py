@@ -317,6 +317,12 @@ class Database:
                 out.append("bills")
             if "reminders" in tables and not {"credit_id", "bill_id"} <= {r[1] for r in con.execute("PRAGMA table_info(reminders)")}:
                 out.append("reminders.credit_id+bill_id")
+            if "credits" in tables and any(r[1] == "account_id" and r[3] for r in con.execute("PRAGMA table_info(credits)")):
+                out.append("credits.account_optional")
+            if "rewards" not in tables or "reward_history" not in tables:
+                out.append("rewards")
+            if "reminders" in tables and "reward_id" not in {r[1] for r in con.execute("PRAGMA table_info(reminders)")}:
+                out.append("reminders.reward_id")
             return out
         finally:
             con.close()
@@ -559,8 +565,18 @@ class Database:
             con.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_rem_loan ON reminders(loan_id) WHERE kind='loan'")
             # Expiring credits 抵用金 (additive): refund / cancellation / bonus credits held on an account with an expiry
             # date. Memo only (never a transaction); credit_uses logs each (partial) use. Reminder kind 'credit'.
+            # credits.account_id was NOT NULL: a credit may now belong to an issuer only (airline / hotel / store credit not
+            # tied to a card). SQLite can't drop NOT NULL, so the table is rebuilt once (rows and ids kept).
+            if any(r[1] == "account_id" and r[3] for r in con.execute("PRAGMA table_info(credits)")):
+                cols = [r[1] for r in con.execute("PRAGMA table_info(credits)")]
+                sql = con.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='credits'").fetchone()[0]
+                con.execute("DROP TRIGGER IF EXISTS trg_acct_delete_credits")
+                con.execute(sql.replace("account_id INTEGER NOT NULL", "account_id INTEGER", 1).replace("CREATE TABLE credits", "CREATE TABLE credits_new", 1))
+                con.execute(f"INSERT INTO credits_new({','.join(cols)}) SELECT {','.join(cols)} FROM credits")
+                con.execute("DROP TABLE credits")
+                con.execute("ALTER TABLE credits_new RENAME TO credits")
             con.execute("""CREATE TABLE IF NOT EXISTS credits (
-                id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL, source TEXT NOT NULL, title TEXT DEFAULT '',
+                id INTEGER PRIMARY KEY, account_id INTEGER, source TEXT NOT NULL, title TEXT DEFAULT '',
                 amount REAL NOT NULL, remaining REAL NOT NULL, currency TEXT NOT NULL, issued_date TEXT NOT NULL,
                 expiry_date TEXT, status TEXT NOT NULL DEFAULT 'open', reference TEXT DEFAULT '', note TEXT DEFAULT '',
                 closed_at TEXT, is_demo INTEGER DEFAULT 0,
@@ -602,6 +618,24 @@ class Database:
                 con.execute("ALTER TABLE reminders ADD COLUMN bill_id INTEGER")
             con.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_rem_credit ON reminders(credit_id) WHERE kind='credit'")
             con.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_rem_bill ON reminders(bill_id) WHERE kind='bill'")
+            # Miles & points 里程/积分 (additive): one row per loyalty program (airline miles, hotel points, card points),
+            # its balance in its own unit, expiry date and optional value per point. Memo only: never a transaction, not
+            # in net worth. reward_history keeps every balance update. Reminder kind 'reward' (expiry, like credits).
+            con.execute("""CREATE TABLE IF NOT EXISTS rewards (
+                id INTEGER PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'airline', unit TEXT NOT NULL DEFAULT 'miles',
+                member_no TEXT DEFAULT '', balance REAL NOT NULL DEFAULT 0, balance_date TEXT, expiry_date TEXT,
+                value_per_point REAL, value_currency TEXT, account_id INTEGER, note TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active', is_demo INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now','localtime')), updated_at TEXT)""")
+            con.execute("""CREATE TABLE IF NOT EXISTS reward_history (
+                id INTEGER PRIMARY KEY, reward_id INTEGER NOT NULL, date TEXT NOT NULL, balance REAL NOT NULL, change REAL,
+                expiry_date TEXT, note TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now','localtime')))""")
+            con.execute("CREATE INDEX IF NOT EXISTS ix_rwh_reward ON reward_history(reward_id, date)")
+            con.execute("""CREATE TRIGGER IF NOT EXISTS trg_acct_delete_rewards AFTER DELETE ON accounts BEGIN
+                UPDATE rewards SET account_id=NULL WHERE account_id=OLD.id; END""")
+            if "reward_id" not in {r[1] for r in con.execute("PRAGMA table_info(reminders)")}:
+                con.execute("ALTER TABLE reminders ADD COLUMN reward_id INTEGER")
+            con.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_rem_reward ON reminders(reward_id) WHERE kind='reward'")
             # cursor pagination / account history (additive indexes)
             con.execute("CREATE INDEX IF NOT EXISTS ix_tx_date_id ON transactions(date, id)")
             con.execute("CREATE INDEX IF NOT EXISTS ix_tx_acct_date ON transactions(account_id, date, id)")

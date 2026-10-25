@@ -25,7 +25,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from . import backup as bk
 from . import agent_api, config, demo, email_reports, mailer, offsite, importers, ingest, ledger, loans, plan_lines, taxtips, principal, projects, quotes, receipts, reimburse, reminders, reconcile, reserves, returns, schedules
-from . import bills, credits
+from . import bills, credits, rewards
 from .db import ACCOUNT_TYPES, BASE_DIR, Database, now_iso
 from .email_rules import parse_email
 
@@ -218,6 +218,7 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
             "bill_review_count": bills.review_count(db),
             "credit_expiring_count": len(credits.expiring(db)),
             "credit_expired_count": credits.list_credits(db, {"state": "expired"})["expired_count"],
+            **dict(zip(("reward_expiring_count", "reward_expired_count"), rewards.attention(db))),
             "has_demo": bool(db.one("SELECT 1 x FROM accounts WHERE is_demo=1 LIMIT 1")),
             "prefs": ledger.get_prefs(db),
             "adj_reasons": [{"code": c, "name": en, "name_zh": zh} for c, en, zh in ledger.ADJ_REASONS],
@@ -715,7 +716,7 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
 
     @app.post("/api/credits")
     def credit_create(body: dict = Body(...)):
-        """{account_id, source: refund|cancel|bonus, amount, remaining?, currency?, issued_date?, expiry_date, title?,
+        """{account_id? (blank = issuer only: then title is required), source: refund|cancel|bonus, amount, remaining?, currency?, issued_date?, expiry_date, title?,
         reference?, note?}. A note only: never a transaction."""
         return credits.create(db, dict(body or {}))
 
@@ -748,6 +749,51 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
     @app.post("/api/credits/{cid}/reopen")
     def credit_reopen(cid: int):
         return credits.reopen(db, cid)
+
+    # ------------------------------------------------------------ miles & points 里程/积分
+    @app.exception_handler(rewards.NotFound)
+    async def _reward_nf(_req, exc):
+        return JSONResponse({"detail": "Program not found"}, status_code=404)
+
+    @app.get("/api/rewards")
+    def reward_list(request: Request):
+        """Loyalty programs: ?status=active (default) | closed | all, kind=airline|hotel|card|other."""
+        return rewards.list_rewards(db, dict(request.query_params))
+
+    @app.post("/api/rewards")
+    def reward_create(body: dict = Body(...)):
+        """{name, kind?, unit?, member_no?, balance?, balance_date?, expiry_date?, value_cents? | value_per_point?,
+        value_currency?, account_id?, note?}. A note only: never a transaction, not in net worth."""
+        return rewards.create(db, dict(body or {}))
+
+    @app.get("/api/rewards/{rid}")
+    def reward_get(rid: int):
+        return rewards.get(db, rid)
+
+    @app.put("/api/rewards/{rid}")
+    def reward_update(rid: int, body: dict = Body(...)):
+        return rewards.update(db, rid, dict(body or {}))
+
+    @app.delete("/api/rewards/{rid}")
+    def reward_delete(rid: int):
+        return rewards.delete(db, rid)
+
+    @app.post("/api/rewards/{rid}/balance")
+    def reward_balance(rid: int, body: dict = Body(...)):
+        """{balance} (new total) or {change} (+earned / -used), date?, expiry_date?, note?."""
+        return rewards.set_balance(db, rid, body or {})
+
+    @app.delete("/api/rewards/{rid}/history/{hid}")
+    def reward_undo(rid: int, hid: int):
+        return rewards.undo_history(db, rid, hid)
+
+    @app.post("/api/rewards/{rid}/close")
+    def reward_close(rid: int):
+        return rewards.set_status(db, rid, "closed")
+
+    @app.post("/api/rewards/{rid}/reopen")
+    def reward_reopen(rid: int):
+        return rewards.set_status(db, rid, "active")
 
     # ------------------------------------------------------------ bills 账单待付 (email-driven payment tasks)
     @app.exception_handler(bills.NotFound)
