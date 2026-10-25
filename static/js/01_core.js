@@ -157,13 +157,13 @@ function typeOptions(selected) { return Object.entries(S.meta.account_types).map
 /* ---------- navigation ---------- */
 const ROUTES = [
   ['home', '🏠', 'Home'], ['dashboard', '📊', 'Dashboard'], ['transactions', '🧾', 'Transactions'], ['accounts', '🏦', 'Accounts'],
-  ['investments', '📈', 'Investments'], ['budgets', '🎯', 'Budgets'], ['scheduled', '🔁', 'Scheduled'], ['reimb', '🧾', 'Reimbursements'], ['reserves', '🔒', 'Reserves'], ['loans', '🤝', 'Loans'], ['reminders', '⏰', 'Reminders'], ['projects', '📁', 'Projects'], ['reports', '📉', 'Reports'],
+  ['investments', '📈', 'Investments'], ['budgets', '🎯', 'Budgets'], ['scheduled', '🔁', 'Scheduled'], ['reimb', '🧾', 'Reimbursements'], ['reserves', '🔒', 'Reserves'], ['loans', '🤝', 'Loans'], ['credits', '🎟', 'Credits'], ['bills', '📬', 'Bills'], ['reminders', '⏰', 'Reminders'], ['projects', '📁', 'Projects'], ['reports', '📉', 'Reports'],
   ['review', '📥', 'Quick add & Review'], ['settings', '⚙️', 'Settings'],
 ];
 function renderNav() {
   let cur = (location.hash.slice(2) || 'home').split(/[/?]/)[0]; if (cur === 'account') cur = 'accounts';
   const rc = S.meta ? S.meta.review_count + (S.meta.reserve_review_count || 0) : 0;
-  $('#nav').innerHTML = ROUTES.map(([k, i, l]) => `<a href="#/${k}" class="${k === cur ? 'active' : ''}"><span class="ico">${i}</span>${l}${k === 'review' && rc ? `<span class="badge">${rc}</span>` : ''}${k === 'reserves' && S.meta && S.meta.reserve_review_count ? `<span class="badge" title="Holds found in emails to review">${S.meta.reserve_review_count}</span>` : ''}${k === 'reminders' && S.meta && S.meta.reminder_count ? `<span class="badge">${S.meta.reminder_count}</span>` : ''}</a>`).join('');
+  $('#nav').innerHTML = ROUTES.map(([k, i, l]) => `<a href="#/${k}" class="${k === cur ? 'active' : ''}"><span class="ico">${i}</span>${l}${k === 'review' && rc ? `<span class="badge">${rc}</span>` : ''}${k === 'reserves' && S.meta && S.meta.reserve_review_count ? `<span class="badge" title="Holds found in emails to review">${S.meta.reserve_review_count}</span>` : ''}${k === 'bills' && S.meta && S.meta.bill_review_count ? `<span class="badge" title="Payments to review">${S.meta.bill_review_count}</span>` : ''}${k === 'credits' && S.meta && S.meta.credit_expiring_count ? `<span class="badge" title="Credits expiring soon">${S.meta.credit_expiring_count}</span>` : ''}${k === 'reminders' && S.meta && S.meta.reminder_count ? `<span class="badge">${S.meta.reminder_count}</span>` : ''}</a>`).join('');
   const mob = ['home', 'transactions', 'accounts', 'review', 'settings'];
   const moreBadge = S.meta ? (S.meta.reserve_review_count || 0) + (S.meta.reminder_count || 0) : 0;
   $('#mnav').innerHTML = ROUTES.filter(r => mob.includes(r[0])).map(([k, i, l]) => `<a href="#/${k}" class="${k === cur ? 'active' : ''}"><span class="ico">${i}</span>${l.split(' ')[0].replace('Quick', 'Review')}${k === 'review' && rc ? `<span class="badge">${rc}</span>` : ''}</a>`).join('')

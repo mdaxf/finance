@@ -49,6 +49,12 @@ Screenshots (made with clearly labeled `[DEMO]` data, which has since been remov
   * Hotel / rental card holds (a note only: never in balances or stats, the card shows *On hold* and less
     available credit) and refundable deposits (a transfer into the system *Deposits 押金* account). One-step check-out
     with preview, FX adjustment, reminders and email-alert detection. See [Reserves](#reserves-押金预授权-hotel-and-rental-deposits-card-holds).
+* **Credits 抵用金** (expiring refund / cancellation / bonus credits): track what is left, use all or part of it,
+  get a reminder 6 months (configurable) before it expires, and see expired credits flagged.
+  See [Credits](#credits-抵用金-expiring-refund--cancellation--bonus-credits).
+* **Bills 账单待付** (email-driven bill schedules): bill and payment-request emails become payment tasks with a
+  reminder 3 days (configurable) before the due date; payment-confirmation emails mark the matching task paid, and
+  unclear ones wait for review. See [Bills](#bills-账单待付-email-driven-bill-schedules).
 * **New transaction form 记一笔**
   * **Quick add → form:** next to *Add* in the header box (and on the Review page) there is **✎ Review / Open in
     form**. It parses your text without saving and opens the form pre-filled: type, amount, currency, account
@@ -430,6 +436,9 @@ The tests cover:
 * the quick-add parser (EN/中文)
 * ledger math, FX conversion, investments and the API (auth, API key, CRUD, CSV import/export, backups)
 * email rules, using fake sample alerts for every preset
+* expiring credits (window and expiry logic, use and partial use, reminders) and email-driven bills (parsing, task
+  creation, reminders, payment matching including no-match and ambiguous cases): `tests/test_credits.py`,
+  `tests/test_bills.py`
 * Suishouji import, using a synthetic workbook, a synthetic app CSV, and ezBookkeeping's MIT-licensed sample `.xls`
   files
 
@@ -437,7 +446,8 @@ The tests cover:
 ```
 app/        main.py (routes), db.py (schema/seed), ledger.py (balances/reports), parser.py (quick-add),
             ingest.py (quick-add/email/IMAP), email_rules.py, importers.py (CSV + Suishouji), backup.py,
-            quotes.py, telegram_bot.py, demo.py, serve.py, cli.py, config.py (env/.env), reconcile.py, returns.py, schedules.py
+            quotes.py, telegram_bot.py, demo.py, serve.py, cli.py, config.py (env/.env), reconcile.py, returns.py, schedules.py,
+            reminders.py, reserves.py, credits.py (expiring credits), bills.py (email-driven bills)
 static/     SPA (index.html, login.html, style.css, js/, vendor/chart.umd.min.js)
 tests/      pytest suite + fixtures
 docs/       sui_reference.md
@@ -657,6 +667,77 @@ API:
 
 Screenshots (FAKE `[DEMO]` data): `docs/screenshots/54_reserves_list.png`, `55_reserve_detail_timeline.png`, `56_reserve_checkout.png`, `57_reserve_reminder.png` (each with a `_zh` version).
 
+## Credits 抵用金 (expiring refund / cancellation / bonus credits)
+
+Open **🎟 Credits** in the sidebar. A credit is money a merchant gives you instead of cash, for example an airline credit
+for a cancelled flight, store credit for a return, or a sign-up bonus. Like a card hold, it is **a note only**: it never
+creates a transaction or changes a balance or report.
+
+- **Fields:** account that holds it, source (`refund` | `cancel` | `bonus`), amount, remaining balance (defaults to the
+  amount), currency (defaults to the account's), issued date, **expiry date**, title, reference and note.
+- **Use:** **Use…** records a use. Leave the amount blank or enter all that is left to mark it **used**; enter less to mark it
+  **partly used**. Each use is logged and can be undone (↶). **Close** gives up what is left (void); **Reopen** undoes that.
+- **Status:** `active`, `partial`, `used`, `void`, or **`expired`** (money left and the expiry date has passed). Expired
+  credits are flagged in red on the Credits page and in Reminders, and are not counted as *Available*. Recording a use on
+  an expired credit needs a confirmation (`force: true`).
+- **Reminders:** every open credit with money left has a *credit* reminder due on its expiry date. It shows from
+  **6 months before** (*Credits → Remind me N months*, or Reminders → Settings; setting `credit_expiry_lead_months`, 0–60).
+  It is in Reminders, on Home, in the iPhone notify text, the reminder emails and the Telegram push, listed for its whole
+  window. After the expiry date it shows as *Expired* until the credit is used or closed, or you press ✓. It completes
+  by itself when the credit is used up or closed, and comes back if the credit is reopened.
+- **API:** `GET /api/credits?state=active,partial,expired (default)|used|void|all&account_id=&source=&expiring=1&months=`,
+  `GET /api/credits/expiring?months=`, `POST /api/credits`, `GET|PUT|DELETE /api/credits/{id}`,
+  `POST /api/credits/{id}/use` `{amount?, date?, note?, transaction_id?, force?}`, `DELETE /api/credits/{id}/uses/{use_id}`,
+  `POST /api/credits/{id}/void|reopen`.
+
+## Bills 账单待付 (email-driven bill schedules)
+
+Open **📬 Bills** in the sidebar. Every email that goes through email ingest (IMAP monitoring or `POST /api/ingest/email`)
+is checked:
+
+- **Bill / payment request** (for example "Your X bill is ready", "amount due", "payment due", "invoice … due", "requested
+  a payment", "please pay", 账单, 应还, 到期还款日, 缴费通知) → the parser reads the **payee**, **amount**, **currency**,
+  **due date** and **reference** and creates a **payment task**. No transaction is recorded, because nothing has been
+  paid yet. A second email for the same bill (same payee, due date and amount) is linked to the existing task instead of
+  making a duplicate. A *bill* reminder is due on the due date and shows **3 days before** (setting
+  `bill_reminder_lead_days`, 0–365, or *Remind days before* on one bill). A request without a due date is due on the day
+  it arrived.
+- **Payment confirmation** ("payment confirmation", "payment received", "thank you for your payment", "your payment of …
+  was processed", 还款成功, 缴费成功, …) → matched against open tasks. A task matches only when all of these hold:
+  - **payee:** the same biller (normalized names that are equal, contain each other, or share most words) or the same
+    sender domain as the bill email;
+  - **amount:** within **1.00 or 1 %** of the bill, whichever is larger (setting `bill_match_tolerance`). A task with no
+    amount is never matched automatically;
+  - **date:** paid between 3 days before the bill was issued and **10 days after the due date** (`bill_match_days`).
+    Without a due date, the window is 45 days from the issue date.
+
+  If **exactly one** task matches, it is marked **paid**, with the paid date, amount and the confirmation email's
+  message-id and subject linked to it. **No match** or **several matches** are never guessed. The confirmation goes to
+  **Bills → Payments to review**, where you pick the bill it pays or dismiss it. The email then continues through the
+  normal flow, so a card payment still lands in *Quick add & Review* as a transfer. A confirmation from a payee with no
+  open task at all, such as an ordinary purchase alert, is not queued.
+- **By hand:** **＋ New bill**, **Paid** (optionally records the payment as an expense from an account), **Cancel**,
+  **Reopen**, edit and delete. *Paid* on a bill reminder in Reminders does the same thing. **🔍 Test an email** shows what
+  the parser reads without saving anything (`POST /api/bills/parse`).
+- **Parsing rules:** a rule of kind **`bill`** or **`bill_paid`** forces an email from that sender to be treated as a bill
+  or a payment confirmation. With `auto`, the wording decides.
+- **Formats the parser understands:** plain-text and HTML bodies; amounts such as `$1,234.56`, `US$`, `€`, `£`, `¥`/`￥`,
+  `123.45 USD`, `3456.78元` (a labelled amount like *Amount due / Total due / Payment amount / 应还金额* wins over the first
+  amount found); due dates such as `2026-11-05`, `11/05/2026`, `11/05/26`, `11/05`, `November 5, 2026`, `Nov 5`,
+  `5 November 2026`, `2026年11月5日`, `11月5日` after a label (*Due date, due on/by, pay by, 到期还款日, 还款日, 缴费截止*). A date
+  without a year is the next one after the email date. US-style `MM/DD` order is assumed for numeric dates. The payee
+  comes from a *Payee / Biller / Merchant / 收款方 / 商户* label, phrases like *Your X bill*, *bill from X*, *payment to X*,
+  *X requested a payment*, or else the sender's display name or domain.
+- **API:** `GET /api/bills?status=open (default)|paid|cancelled|all`, `POST /api/bills`
+  `{payee, amount?, currency?, due_date?, issued_date?, account_id?, reference?, note?, lead_days?}`,
+  `GET|PUT|DELETE /api/bills/{id}`, `POST /api/bills/{id}/paid` `{date?, create_payment?, from_account_id?, amount?}`,
+  `POST /api/bills/{id}/cancel|reopen`, `GET /api/bills/payments?status=review|matched|dismissed|all`,
+  `POST /api/bills/payments/{id}/match` `{bill_id}`, `POST /api/bills/payments/{id}/dismiss`, `POST /api/bills/parse`.
+
+**Upgrading** (both features): the new tables `credits`, `credit_uses`, `bills` and `bill_payments`, the columns
+`reminders.credit_id` and `reminders.bill_id`, and their indexes and triggers are additive. The database is copied to the
+backups folder (`finance-…-before-migrate.db`) first, and no rows are created.
+
 ## Email rules: Balance adjust 调整余额 (statement balance)
 - A parsing rule with **Kind = Balance adjust** (`kind: "balance"`) treats the extracted amount as the account's **new balance** (statement value), not a transaction amount.
 - **Account:** matched by the last-4 regex (e.g. `Account: XXXXX1516` → 1516) against the account's last 4 digits.
@@ -782,6 +863,9 @@ The server recognises the image by its bytes. It accepts any form field name, a 
   * **Upgrading** adds `accounts.card_expiry`, `reminders.expiry/card_state/card_state_at` and the
     `card_expiry_checks` table. These are additive changes, and a copy `finance-…-before-migrate.db` is written to the
     backups folder first.
+* **Credits 抵用金 and Bills 账单待付** add the reminder kinds *credit* (expiring credit, from `credit_expiry_lead_months`
+  before it expires) and *bill* (a bill from an email, `bill_reminder_lead_days` before it is due). See
+  [Credits](#credits-抵用金-expiring-refund--cancellation--bonus-credits) and [Bills](#bills-账单待付-email-driven-bill-schedules).
 * **Lead window**: reminders appear N days before the due date. The default is 10 (*Reminders → Settings*,
   `reminder_lead_days`). A schedule can override it with *Remind days before*, a card with *Remind days before due*.
   The *All upcoming* filter shows later items. The nav badge counts overdue items plus items inside their window.
