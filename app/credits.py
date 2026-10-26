@@ -2,7 +2,7 @@
 expire on a date (airline / travel credits, store credit, sign-up or promo bonuses, …).
 
 A credit is a NOTE, like a card hold: it is never a transaction, so balances, net worth and every stat ignore it.
-Fields: account, source (refund | cancel | bonus), amount, remaining, currency, issued date, expiry date, issuer /
+Fields: account (optional: issuer-only credits), source (refund | cancel | bonus), amount, remaining, currency, issued date, expiry date, issuer /
 title, reference, note. Using it ("mark used" / "partially used") lowers `remaining` and is logged in credit_uses.
 
 Stored status: open | used | void (closed by hand: forfeited, written off). Derived `state`:
@@ -196,15 +196,19 @@ FIELDS = ("account_id", "source", "amount", "remaining", "currency", "issued_dat
 def _clean(db: Database, body: dict, ex: dict | None = None) -> dict:
     d = dict(ex or {})
     d.update({k: body[k] for k in FIELDS if k in body})
-    if d.get("account_id") in (None, ""):
-        raise ValidationError("Choose the account that holds the credit")
-    try:
-        d["account_id"] = int(d["account_id"])
-    except (TypeError, ValueError):
-        raise ValidationError("account_id must be a number")
-    acct = db.one("SELECT id, currency FROM accounts WHERE id=?", (d["account_id"],))
-    if not acct:
-        raise ValidationError("Unknown account")
+    acct = None  # optional: a credit can belong to the issuer only (airline / hotel / store credit not tied to a card)
+    if d.get("account_id") in (None, "", 0, "0"):
+        d["account_id"] = None
+    else:
+        try:
+            d["account_id"] = int(d["account_id"])
+        except (TypeError, ValueError):
+            raise ValidationError("account_id must be a number")
+        acct = db.one("SELECT id, currency FROM accounts WHERE id=?", (d["account_id"],))
+        if not acct:
+            raise ValidationError("Unknown account")
+    if not acct and not str(d.get("title") or "").strip():
+        raise ValidationError("Enter who issued the credit (e.g. Delta travel credit), or choose an account")
     src = str(d.get("source") or "").strip().lower()
     src = {"cancellation": "cancel", "cancelled": "cancel", "canceled": "cancel", "promo": "bonus"}.get(src, src)
     if src not in SOURCES:
@@ -222,7 +226,8 @@ def _clean(db: Database, body: dict, ex: dict | None = None) -> dict:
         d["remaining"] = _r2(max(amt - ((ex.get("amount") or 0) - (ex.get("remaining") or 0)), 0))
     if d["remaining"] > amt + EPS:
         raise ValidationError("Remaining balance can't be more than the credit amount")
-    d["currency"] = (str(d.get("currency") or "").strip().upper() or acct["currency"])
+    d["currency"] = (str(d.get("currency") or "").strip().upper()
+                     or (acct["currency"] if acct else db.get_setting("base_currency", "USD") or "USD"))
     d["issued_date"] = _day(d.get("issued_date"), "Issued date") or today(db).isoformat()
     d["expiry_date"] = _day(d.get("expiry_date"), "Expiry date")
     if not d["expiry_date"]:
@@ -343,6 +348,8 @@ def account_summary(db: Database, on: date | None = None) -> dict[int, dict]:
     months = lead_months(db)
     out: dict[int, dict] = {}
     for r in db.all("SELECT * FROM credits WHERE status='open' AND remaining>0"):
+        if r["account_id"] is None:
+            continue
         c = _decorate(db, r, on, months)
         s = out.setdefault(r["account_id"], {"credits_available": {}, "credits_expiring": 0, "credits_expired": 0})
         if c["expired"]:

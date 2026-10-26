@@ -13,12 +13,20 @@ function crWhen(c) {
   return `<div class="small ${c.expiring_soon ? 'warn-t' : 'muted'}">${esc(c.days_left === 0 ? t('Expires today') : t('{n} days left', {n: c.days_left}))}</div>`;
 }
 
-VIEWS.credits = async (v) => {
+/* Credits page tabs: 🎟 Credits (#/credits) | ✈️ Miles & points (#/credits/rewards), each with its attention count */
+function crTabs(tab) {
+  const m = S.meta || {};
+  const n = {credits: (m.credit_expiring_count || 0) + (m.credit_expired_count || 0), rewards: (m.reward_expiring_count || 0) + (m.reward_expired_count || 0)};
+  return `<div class="tabs">${[['credits', '🎟 ' + t('Credits'), '#/credits'], ['rewards', '✈️ ' + t('Miles & points'), '#/credits/rewards']].map(([k, l, h]) =>
+    `<a href="${h}" class="${k === tab ? 'active' : ''}">${l}${n[k] ? ` <span class="badge">${n[k]}</span>` : ''}</a>`).join('')}</div>`;
+}
+VIEWS.credits = async (v, rest) => {
+  if (rest && rest[0] === 'rewards') return rewardsView(v);
   const st = S.cr;
   const d = await api('/api/credits?state=' + (st.states.length ? st.states.join(',') : 'none'));
   const sc = d.state_counts || {};
   const set = S.meta.settings;
-  v.innerHTML = `<div class="card"><div class="page-h"><h2>🎟 ${t('Credits')}</h2><div class="row"><button class="btn pri" id="crNew">＋ ${t('New credit')}</button></div></div>
+  v.innerHTML = `${crTabs('credits')}<div class="card"><div class="page-h"><h2>🎟 ${t('Credits')}</h2><div class="row"><button class="btn pri" id="crNew">＋ ${t('New credit')}</button></div></div>
     <p class="small muted">${t('Credits from refunds, cancellations and bonuses that expire (airline and travel credits, store credit, promo bonuses). A credit is a note only: it never changes a balance.')}</p>
     <div class="rb-cards">
       <div class="ic"><div class="lbl">${t('Available')}</div><div class="val">${d.available.length ? d.available.map(x => money(x.amount, x.currency)).join('<br>') : money(0)}</div><div class="small muted">${t('Not expired, not used')}</div></div>
@@ -28,7 +36,7 @@ VIEWS.credits = async (v) => {
     <div class="rb-flt"><span class="chips" role="group">${Object.entries(CR_STATE).map(([k, l]) => `<button type="button" class="chip${st.states.includes(k) ? ' on' : ''}" data-st="${k}" aria-pressed="${st.states.includes(k)}">${t(l)} <span class="cnt">${sc[k] || 0}</span></button>`).join('')}</span></div>
     ${d.items.length ? `<div class="scroll-x"><table class="t"><thead><tr><th>${t('Expires')}</th><th>${t('Credit')}</th><th class="right">${t('Amount')}</th><th class="right">${t('Remaining')}</th><th>${t('Status')}</th><th></th></tr></thead><tbody>
       ${d.items.map(c => `<tr data-cid="${c.id}"><td class="nowrap">${esc(c.expiry_date || '')}${crWhen(c)}</td>
-        <td class="cr-open" style="cursor:pointer"><b>${esc(c.label)}</b><div class="small muted">${esc(t(CR_SOURCE[c.source] || c.source))} · ${esc(c.account_name || '')} · ${esc(t('issued {date}', {date: c.issued_date}))}${c.reference ? ' · #' + esc(c.reference) : ''}</div></td>
+        <td class="cr-open" style="cursor:pointer"><b>${esc(c.label)}</b><div class="small muted">${[t(CR_SOURCE[c.source] || c.source), c.account_name, t('issued {date}', {date: c.issued_date})].filter(Boolean).map(esc).join(' · ')}${c.reference ? ' · #' + esc(c.reference) : ''}</div></td>
         <td class="right nowrap">${money(c.amount, c.currency)}</td>
         <td class="right nowrap"><b class="${c.expired ? 'neg' : c.closed ? 'muted' : ''}">${money(c.remaining, c.currency)}</b></td>
         <td>${crBadge(c)}</td>
@@ -46,12 +54,12 @@ VIEWS.credits = async (v) => {
 };
 function creditForm(c, after) {
   const bg = modal(c ? t('Edit credit') : t('New credit'), `<form class="form" id="crF" autocomplete="off">
-    <label class="f"><span>${t('Account')}</span><select name="account_id" required>${acctOptions(c ? c.account_id : null, {blank: t('— choose —')})}</select></label>
+    <label class="f"><span>${t('Account')} <span class="muted">(${t('optional')})</span></span><select name="account_id">${acctOptions(c ? c.account_id : null, {blank: t('— none: issuer only —')})}</select></label>
     <label class="f"><span>${t('Source')}</span><select name="source">${Object.entries(CR_SOURCE).map(([k, l]) => `<option value="${k}" ${c && c.source === k ? 'selected' : ''}>${t(l)}</option>`).join('')}</select></label>
-    <label class="f full"><span>${t('Title')}</span><input name="title" value="${esc(c ? c.title || '' : '')}" placeholder="${t('e.g. Airline credit for a cancelled flight')}"></label>
+    <label class="f full"><span>${t('Issuer / title')}</span><input name="title" value="${esc(c ? c.title || '' : '')}" placeholder="${t('e.g. Delta travel credit for a cancelled flight')}"></label>
     <label class="f"><span>${t('Amount')}</span><input name="amount" type="number" step="0.01" min="0" required value="${c ? c.amount : ''}"></label>
     <label class="f"><span>${t('Remaining')}</span><input name="remaining" type="number" step="0.01" min="0" value="${c ? c.remaining : ''}" placeholder="${t('= amount')}"></label>
-    <label class="f"><span>${t('Currency')}</span><input name="currency" maxlength="3" value="${esc(c ? c.currency : '')}" placeholder="${t('account currency')}"></label>
+    <label class="f"><span>${t('Currency')}</span><input name="currency" maxlength="3" value="${esc(c ? c.currency : '')}" placeholder="${t('account currency, else base')}"></label>
     <label class="f"><span>${t('Issued')}</span><input name="issued_date" type="date" value="${esc(c ? c.issued_date : today())}"></label>
     <label class="f"><span>${t('Expires')}</span><input name="expiry_date" type="date" required value="${esc(c ? c.expiry_date || '' : '')}"></label>
     <label class="f"><span>${t('Reference')}</span><input name="reference" value="${esc(c ? c.reference || '' : '')}"></label>
@@ -81,7 +89,7 @@ function creditUse(c, after) {
 }
 async function openCredit(id, after) {
   const c = await api('/api/credits/' + id);
-  const bg = modal('🎟 ' + esc(c.label), `<div class="small">${crBadge(c)} ${esc(t(CR_SOURCE[c.source] || c.source))} · ${esc(c.account_name || '')}${c.reference ? ' · #' + esc(c.reference) : ''}</div>
+  const bg = modal('🎟 ' + esc(c.label), `<div class="small">${crBadge(c)} ${[t(CR_SOURCE[c.source] || c.source), c.account_name].filter(Boolean).map(esc).join(' · ')}${c.reference ? ' · #' + esc(c.reference) : ''}</div>
     <div class="rb-cards"><div class="ic"><div class="lbl">${t('Amount')}</div><div class="val">${money(c.amount, c.currency)}</div></div>
       <div class="ic"><div class="lbl">${t('Used')}</div><div class="val">${money(c.used_amount, c.currency)}</div></div>
       <div class="ic"><div class="lbl">${t('Remaining')}</div><div class="val ${c.expired ? 'neg' : ''}">${money(c.remaining, c.currency)}</div></div></div>
@@ -103,6 +111,113 @@ function cbCreditReminderActions(r) {
 function cbBindReminders(root, after) {
   $$('[data-cruse]', root).forEach(b => b.onclick = async () => creditUse(await api('/api/credits/' + b.dataset.cruse), after));
   $$('[data-crop]', root).forEach(b => b.onclick = () => openCredit(+b.dataset.crop, after));
+  $$('[data-rwbal]', root).forEach(b => b.onclick = async () => rewardBalance(await api('/api/rewards/' + b.dataset.rwbal), after));
+  $$('[data-rwop]', root).forEach(b => b.onclick = () => openReward(+b.dataset.rwop, after));
+}
+
+/* ---------- Miles & points 里程/积分 (#/credits/rewards) ----------
+   One row per loyalty program: balance in its own unit (miles / points), expiry date (reminded like credits), optional
+   value per point for an estimated value. Update the balance in one tap; every update is kept. Never a transaction. */
+S.rw = S.rw || {status: 'active'};
+const RW_KIND = {airline: 'Airline', hotel: 'Hotel', card: 'Card points', other: 'Other'};
+const RW_ICON = {airline: '✈️', hotel: '🏨', card: '💳', other: '⭐'};
+const rwPts = (n, unit) => `${Number(n || 0).toLocaleString(i18nLocale(), {maximumFractionDigits: 2})} ${esc(t(unit || 'points'))}`;
+function rwWhen(p) {
+  if (!p.expiry_date) return `<div class="small muted">${t('No expiry')}</div>`;
+  if (p.expired) return `<div class="small neg">⚠️ ${esc(t('Expired {n} days ago', {n: -p.days_left}))}</div>`;
+  return `<div class="small ${p.expiring_soon ? 'warn-t' : 'muted'}">${esc(p.days_left === 0 ? t('Expires today') : t('{n} days left', {n: p.days_left}))}</div>`;
+}
+async function rewardsView(v) {
+  const st = S.rw;
+  const d = await api('/api/rewards?status=' + st.status);
+  const sc = d.status_counts || {};
+  v.innerHTML = `${crTabs('rewards')}<div class="card"><div class="page-h"><h2>✈️ ${t('Miles & points')}</h2><div class="row"><button class="btn pri" id="rwNew">＋ ${t('Add program')}</button></div></div>
+    <p class="small muted">${t('Airline miles, hotel points and card points, with their expiry dates. A note only: never in balances or net worth.')}</p>
+    <div class="rb-cards">
+      <div class="ic"><div class="lbl">${t('Estimated value')}</div><div class="val">${d.est_value.length ? d.est_value.map(x => money(x.amount, x.currency)).join('<br>') : '—'}</div><div class="small muted">${t('Where a value per point is set')}</div></div>
+      <div class="ic"><div class="lbl">${t('Expiring soon')}</div><div class="val ${d.expiring_count ? 'warn-t' : ''}">${d.expiring_count}</div><div class="small muted">${esc(t('Within {n} months', {n: d.lead_months}))}</div></div>
+      <div class="ic"><div class="lbl">${t('Expired')}</div><div class="val ${d.expired_count ? 'neg' : ''}">${d.expired_count}</div><div class="small muted">${t('With points left')}</div></div>
+    </div>
+    <div class="rb-flt"><span class="chips" role="group">${[['active', 'Active'], ['closed', 'Closed']].map(([k, l]) => `<button type="button" class="chip${st.status === k ? ' on' : ''}" data-rs="${k}">${t(l)} <span class="cnt">${sc[k] || 0}</span></button>`).join('')}</span></div>
+    ${d.items.length ? `<div class="scroll-x"><table class="t resp"><thead><tr><th>${t('Program')}</th><th class="right">${t('Balance')}</th><th>${t('Expires')}</th><th></th></tr></thead><tbody>
+      ${d.items.map(p => `<tr><td data-rop="${p.id}" style="cursor:pointer">${RW_ICON[p.kind] || '⭐'} <b>${esc(p.name)}</b><div class="small muted">${[p.member_no ? '#' + p.member_no : '', t(RW_KIND[p.kind] || p.kind), p.account_name].filter(Boolean).map(esc).join(' · ')}</div></td>
+        <td class="right nowrap"><b class="${p.expired ? 'neg' : ''}">${rwPts(p.balance, p.unit)}</b>${p.est_value != null ? `<div class="small muted">≈ ${money(p.est_value, p.value_currency)}</div>` : ''}<div class="small muted">${esc(t('as of {date}', {date: p.balance_date || '—'}))}</div></td>
+        <td class="nowrap">${esc(p.expiry_date || '')}${rwWhen(p)}</td>
+        <td class="right nowrap">${p.closed ? '' : `<button class="btn sm pri" data-rbal="${p.id}">${t('Update')}</button>`} <button class="btn sm" data-rop="${p.id}">${t('Details')}</button></td></tr>`).join('')}</tbody></table></div>`
+      : `<div class="empty">${st.status === 'active' ? t('No programs yet. Add your airline, hotel or card rewards to keep an eye on their balance and expiry.') : t('Nothing here')}</div>`}
+    <div class="small muted">${t('Expiry reminders use the same lead time as credits; change it on the Credits tab.')}</div></div>`;
+  const after = async () => { await loadMeta(); route(); };
+  const byId = Object.fromEntries(d.items.map(p => [p.id, p]));
+  $('#rwNew', v).onclick = () => rewardForm(null, after);
+  $$('[data-rs]', v).forEach(b => b.onclick = () => { st.status = b.dataset.rs; route(); });
+  $$('[data-rbal]', v).forEach(b => b.onclick = () => rewardBalance(byId[b.dataset.rbal], after));
+  $$('[data-rop]', v).forEach(b => b.onclick = () => openReward(+b.dataset.rop, after));
+}
+function rewardForm(p, after) {
+  const bg = modal(p ? t('Edit program') : t('Add program'), `<form class="form" id="rwF" autocomplete="off">
+    <label class="f full"><span>${t('Program')}</span><input name="name" required value="${esc(p ? p.name : '')}" placeholder="${t('e.g. United MileagePlus, Marriott Bonvoy')}"></label>
+    <label class="f"><span>${t('Type')}</span><select name="kind">${Object.entries(RW_KIND).map(([k, l]) => `<option value="${k}" ${p && p.kind === k ? 'selected' : ''}>${RW_ICON[k]} ${t(l)}</option>`).join('')}</select></label>
+    <label class="f"><span>${t('Unit')}</span><input name="unit" value="${esc(p ? p.unit : '')}" placeholder="${t('miles / points')}"></label>
+    <label class="f"><span>${t('Member no.')}</span><input name="member_no" value="${esc(p ? p.member_no || '' : '')}"></label>
+    <label class="f"><span>${t('Balance')}</span><input name="balance" inputmode="decimal" value="${p ? p.balance : ''}" placeholder="0"></label>
+    <label class="f"><span>${t('As of')}</span><input name="balance_date" type="date" value="${esc(p ? p.balance_date || '' : today())}"></label>
+    <label class="f"><span>${t('Expires')}</span><input name="expiry_date" type="date" value="${esc(p ? p.expiry_date || '' : '')}"></label>
+    <label class="f"><span>${t('Value per point (¢)')} <span class="muted">(${t('optional')})</span></span><input name="value_cents" type="number" step="0.01" min="0" value="${p && p.value_per_point ? +(p.value_per_point * 100).toFixed(4) : ''}" placeholder="${t('e.g. 1.2')}"></label>
+    <label class="f"><span>${t('Linked card')} <span class="muted">(${t('optional')})</span></span><select name="account_id">${acctOptions(p ? p.account_id : null, {blank: t('— none —')})}</select></label>
+    <label class="f full"><span>${t('Note')}</span><input name="note" value="${esc(p ? p.note || '' : '')}"></label></form>`,
+    {buttons: `<button class="btn" data-x2>${t('Cancel')}</button><button class="btn pri" data-ok>${t('Save')}</button>`});
+  const f = $('#rwF', bg); $('[data-x2]', bg).onclick = bg.close;
+  $('[data-ok]', bg).onclick = async () => {
+    if (!f.reportValidity()) return;
+    await guard(() => api(p ? `/api/rewards/${p.id}` : '/api/rewards', {method: p ? 'PUT' : 'POST', body: Object.fromEntries(new FormData(f))}));
+    bg.close(); toast(t('Saved')); after();
+  };
+}
+function rewardBalance(p, after) {
+  const L = {total: 'New balance', earn: 'Earned', use: 'Used'};
+  const bg = modal(t('Update balance'), `<form class="form" id="rbF" autocomplete="off">
+    <p class="small muted full">${RW_ICON[p.kind] || '⭐'} ${esc(p.name)} · ${t('now')} ${rwPts(p.balance, p.unit)}${p.expiry_date ? ' · ' + esc(t('expires {date}', {date: p.expiry_date})) : ''}</p>
+    <div class="f full"><span class="chips" role="group">${Object.entries(L).map(([k, l], i) => `<button type="button" class="chip${i ? '' : ' on'}" data-mode="${k}">${t(l)}</button>`).join('')}</span></div>
+    <label class="f"><span id="rbAmtL">${t('New balance')} (${esc(t(p.unit))})</span><input name="amount" inputmode="decimal" required value="${p.balance}"></label>
+    <label class="f"><span>${t('Date')}</span><input name="date" type="date" value="${today()}"></label>
+    <label class="f"><span>${t('New expiry date')} <span class="muted">(${t('blank = keep')})</span></span><input name="expiry_date" type="date"></label>
+    <label class="f full"><span>${t('Note')}</span><input name="note" placeholder="${t('e.g. statement, flight to Tokyo')}"></label></form>`,
+    {buttons: `<button class="btn" data-x2>${t('Cancel')}</button><button class="btn pri" data-ok>${t('Save')}</button>`});
+  const f = $('#rbF', bg); $('[data-x2]', bg).onclick = bg.close;
+  let mode = 'total';
+  $$('[data-mode]', bg).forEach(b => b.onclick = () => {
+    mode = b.dataset.mode;
+    $$('[data-mode]', bg).forEach(x => x.classList.toggle('on', x === b));
+    $('#rbAmtL', bg).textContent = `${t(L[mode])} (${t(p.unit)})`;
+    f.amount.value = mode === 'total' ? p.balance : ''; f.amount.focus();
+  });
+  $('[data-ok]', bg).onclick = async () => {
+    if (!f.reportValidity()) return;
+    const n = parseFloat(String(f.amount.value).replace(/,/g, ''));
+    const body = {date: f.date.value, expiry_date: f.expiry_date.value, note: f.note.value, ...(mode === 'total' ? {balance: n} : {change: mode === 'use' ? -n : n})};
+    const r = await guard(() => api(`/api/rewards/${p.id}/balance`, {method: 'POST', body}));
+    bg.close(); toast(`${t('Saved')} · ${rwPts(r.balance, r.unit)}`); after();
+  };
+}
+async function openReward(id, after) {
+  const p = await api('/api/rewards/' + id);
+  const bg = modal(`${RW_ICON[p.kind] || '⭐'} ${esc(p.name)}`, `<div class="small muted">${[p.member_no ? '#' + p.member_no : '', t(RW_KIND[p.kind] || p.kind), p.account_name, p.closed ? t('Closed') : ''].filter(Boolean).map(esc).join(' · ')}</div>
+    <div class="rb-cards"><div class="ic"><div class="lbl">${t('Balance')}</div><div class="val ${p.expired ? 'neg' : ''}">${rwPts(p.balance, p.unit)}</div><div class="small muted">${esc(t('as of {date}', {date: p.balance_date || '—'}))}</div></div>
+      <div class="ic"><div class="lbl">${t('Expires')}</div><div class="val">${esc(p.expiry_date || '—')}</div>${rwWhen(p)}</div>
+      <div class="ic"><div class="lbl">${t('Estimated value')}</div><div class="val">${p.est_value != null ? money(p.est_value, p.value_currency) : '—'}</div><div class="small muted">${p.value_per_point ? esc(t('{c}¢ per point', {c: +(p.value_per_point * 100).toFixed(4)})) : t('No value per point set')}</div></div></div>
+    ${p.note ? `<div class="small muted">${esc(p.note)}</div>` : ''}
+    <h3>${t('History')}</h3>${p.history.length ? `<div class="scroll-x"><table class="t">${p.history.map((h, i) => `<tr><td class="nowrap">${esc(h.date)}</td><td class="right nowrap">${h.change != null ? `<span class="${h.change < 0 ? 'neg' : 'pos'}">${h.change > 0 ? '+' : ''}${rwPts(h.change, p.unit)}</span>` : ''}</td><td class="right nowrap"><b>${rwPts(h.balance, p.unit)}</b></td><td class="small muted">${[h.note ? t(h.note) : '', h.expiry_date ? t('expires {date}', {date: h.expiry_date}) : ''].filter(Boolean).map(esc).join(' · ')}</td><td class="right">${i === 0 && p.history.length > 1 ? `<button class="btn sm" data-undo="${h.id}" title="${t('Undo')}">↶</button>` : ''}</td></tr>`).join('')}</table></div>` : `<div class="small muted">—</div>`}`,
+    {wide: true, buttons: `<button class="btn danger" data-del>${t('Delete')}</button><span class="sp"></span>${p.closed ? `<button class="btn" data-reo>${t('Reopen')}</button>` : `<button class="btn" data-cls>${t('Close program')}</button>`}<button class="btn" data-ed>✎ ${t('Edit')}</button>${p.closed ? '' : `<button class="btn pri" data-bal>${t('Update balance')}</button>`}`});
+  const done = () => { bg.close(); after(); };
+  $$('[data-undo]', bg).forEach(b => b.onclick = async () => { await guard(() => api(`/api/rewards/${p.id}/history/${b.dataset.undo}`, {method: 'DELETE'})); done(); });
+  $('[data-del]', bg).onclick = async () => { if (!await confirmBox(t('Delete this program and its history?'))) return; await guard(() => api('/api/rewards/' + p.id, {method: 'DELETE'})); done(); };
+  const cl = $('[data-cls]', bg); if (cl) cl.onclick = async () => { if (!await confirmBox(t('Close this program? It will no longer be tracked or reminded.'))) return; await guard(() => api(`/api/rewards/${p.id}/close`, {method: 'POST'})); done(); };
+  const ro = $('[data-reo]', bg); if (ro) ro.onclick = async () => { await guard(() => api(`/api/rewards/${p.id}/reopen`, {method: 'POST'})); done(); };
+  $('[data-ed]', bg).onclick = () => { bg.close(); rewardForm(p, after); };
+  const bl = $('[data-bal]', bg); if (bl) bl.onclick = () => { bg.close(); rewardBalance(p, after); };
+}
+function cbRewardReminderActions(r) {
+  return `<button class="btn sm pri" data-rwbal="${r.reward_id}">${t('Update balance')}</button> <button class="btn sm" data-rwop="${r.reward_id}">${t('Open')}</button> <button class="btn sm" data-done="${r.id}">✓</button>`;
 }
 
 /* ---------- Bills ---------- */

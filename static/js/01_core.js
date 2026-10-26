@@ -167,7 +167,8 @@ function navBadges() {
   add('review', (m.review_count || 0) + (m.reserve_review_count || 0), '');
   add('reserves', m.reserve_review_count, 'Holds found in emails to review');
   add('bills', m.bill_review_count, 'Payments to review');
-  const ce = m.credit_expiring_count || 0, cx = m.credit_expired_count || 0;
+  // credits + miles & points (same page): expired with something left, or expiring inside the reminder window
+  const ce = (m.credit_expiring_count || 0) + (m.reward_expiring_count || 0), cx = (m.credit_expired_count || 0) + (m.reward_expired_count || 0);
   add('credits', ce + cx, [cx ? t('{n} expired', {n: cx}) : '', ce ? t('{n} expiring soon', {n: ce}) : ''].filter(Boolean).join(' · '));
   add('reminders', m.reminder_count, '');
   return out;
