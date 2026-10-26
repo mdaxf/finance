@@ -303,3 +303,4 @@ td.rs-open,div.rs-open{background:none;color:inherit}
 .ln-d{font-size:11px}.ln-lent{background:#e3f6ee;color:#0f8a5f}.ln-borrowed{background:#fff3dc;color:#9a6200}
 .ln-st-active{background:#e8f0fc;color:#2a5fb0}.ln-st-paid_off{background:#e3f6ee;color:#0f8a5f}.ln-st-closed{background:#eef0f3;color:#5b6b7a}
 .ln-lk{padding-left:4px}.ln-proj td,.ln-proj th{font-variant-numeric:tabular-nums;font-size:13px}.ln-sug .rs-rv-row{margin-bottom:4px}
+tr.rep-row{cursor:pointer}tr.rep-row:hover td{background:var(--hover,#f5f6f8)}

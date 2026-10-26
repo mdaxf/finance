@@ -409,9 +409,12 @@ VIEWS.reports = async (v) => {
   const d = await api(`/api/reports?${new URLSearchParams(Object.entries({...r, ...(S.ledger ? {ledger_id: S.ledger} : {})}).filter(([, x]) => x !== '' && x != null))}`);
   $('#rt').innerHTML = `Income ${money(d.totals.income)} · Expense ${money(d.totals.expense)} · Net ${money(d.totals.net)} · <span title="Investment gain/loss + interest + dividends − investment fees (balance adjustments classified by reason). Not part of income/expense.">Investment income <b class="${d.totals.investment_income >= 0 ? 'pos' : 'neg'}">${money(d.totals.investment_income)}</b></span>`;
   const rows = r.group_by === 'month' ? [...d.rows].sort((a, b) => String(a.key).localeCompare(String(b.key))) : d.rows;
-  $('#rtab').innerHTML = rows.length ? `<table class="t"><thead><tr><th>${esc(r.group_by)}</th><th class="right">Count</th><th class="right">Amount</th><th class="right">%</th></tr></thead><tbody>${rows.map(x => `<tr><td>${esc(x.name)}</td><td class="right">${x.count}</td><td class="right">${money(x.amount)}</td><td class="right">${x.pct}%</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No data</div>';
+  $('#rtab').innerHTML = rows.length ? `<table class="t"><thead><tr><th>${esc(r.group_by)}</th><th class="right">Count</th><th class="right">Amount</th><th class="right">%</th></tr></thead><tbody>${rows.map((x, i) => `<tr data-ri="${i}" class="rep-row" title="Show these transactions"><td>${esc(x.name)} <span class="muted small">›</span></td><td class="right">${x.count}</td><td class="right">${money(x.amount)}</td><td class="right">${x.pct}%</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No data</div>';
   if (rows.length) chart('rc', r.group_by === 'month' ? {type: 'bar', data: {labels: rows.map(x => x.name), datasets: [{label: r.kind, data: rows.map(x => x.amount), backgroundColor: r.kind === 'income' ? '#14a06f' : '#e8553e'}]}} :
     {type: 'pie', data: {labels: rows.map(x => x.name), datasets: [{data: rows.map(x => x.amount), backgroundColor: PALETTE}]}, options: {plugins: {legend: {position: 'right'}}}});
+  // drill-down: a table row or a chart slice / bar opens the transactions behind it
+  $$('#rtab tr[data-ri]').forEach(tr => tr.onclick = () => reportDrill(r, rows[+tr.dataset.ri]));
+  if (S.charts.rc) S.charts.rc.options.onClick = (_e, els) => { if (els.length) reportDrill(r, rows[els[0].index]); };
   const ttg = ['category', 'subcategory', 'month', 'account', 'merchant', 'project'].includes(r.group_by) ? r.group_by : 'month';
   const tt = await api(`/api/reports/tax-tips?${new URLSearchParams(Object.entries({start: r.start, end: r.end, kind: r.kind, group_by: ttg, project_id: r.project_id, ledger_id: S.ledger}).filter(([, x]) => x !== '' && x != null))}`);
   const tx = tt.totals, pc = x => x == null ? '—' : x + '%';
@@ -422,6 +425,14 @@ VIEWS.reports = async (v) => {
   chart('rnw', {type: 'line', data: {labels: nw.history.map(x => x.month), datasets: [{label: 'Net worth', data: nw.history.map(x => x.net_worth), borderColor: '#3a7bd5', fill: false}, {label: 'Assets', data: nw.history.map(x => x.assets), borderColor: '#14a06f'}, {label: 'Liabilities', data: nw.history.map(x => x.liabilities), borderColor: '#e0483a'}]}});
 };
 
+async function reportDrill(r, row) {
+  const q = {group_by: r.group_by, key: row.key ?? '', start: r.start, end: r.end, kind: r.kind, project_id: r.project_id, ledger_id: S.ledger};
+  const d = await guard(() => api('/api/reports/items?' + new URLSearchParams(Object.entries(q).filter(([, x]) => x !== '' && x != null))));
+  const bg = modal(`${esc(row.name)} <span class="small muted">${esc(r.start)} → ${esc(r.end)}</span>`,
+    `<div class="small muted" style="margin-bottom:8px">${d.count} transaction${d.count === 1 ? '' : 's'} · ${r.kind === 'income' ? 'Income' : 'Expense'} ${money(d.total, d.currency)}</div>
+    ${txTable(d.items, {compact: true})}`, {wide: true});
+  bindTxRows(bg, () => { bg.remove(); route(); });
+}
 /* ---------- quick add & review ---------- */
 VIEWS.review = async (v) => {
   const d = await api('/api/review');
