@@ -129,6 +129,47 @@ def resolve_plan_line(db: Database, v, project_id) -> int | None:
     return hit["id"]
 
 
+def _hhmm(v) -> str | None:
+    """'13:35' / '1:35 pm' / '13:35:10' -> '13:35'; anything else -> None."""
+    m = receipts.TIME_RX.search(str(v or ""))
+    if not m:
+        return None
+    h, mi, ap = int(m.group(1)), int(m.group(2)), (m.group(3) or "").lower()
+    if ap:
+        h = h % 12 + (12 if ap == "pm" else 0)
+    return f"{h:02d}:{mi:02d}"
+
+
+def tx_when(date, time=None, receipt_date: str | None = None, warnings: list[str] | None = None) -> str:
+    """The transaction's date + time. A date without a time takes, in order: the `time` field, the time printed on
+    the receipt (same day), the current time when the date is today; else 12:00 with a warning."""
+    now = datetime.now()
+    if not date:
+        date = receipt_date or now.strftime("%Y-%m-%d %H:%M")
+    s = str(date).strip().replace("T", " ")
+    day = s[:10]
+    try:
+        datetime.strptime(day, "%Y-%m-%d")
+    except ValueError:
+        return s  # let the ledger report the bad date
+    rest = s[10:].strip()
+    hm = _hhmm(rest) if rest else None
+    if hm and not (hm == "00:00" and not time):
+        return f"{day} {hm}"
+    if time:
+        hm = _hhmm(time)
+        if not hm:
+            raise AgentError(f"time must look like 13:35 or 1:35 pm (got {time!r})")
+        return f"{day} {hm}"
+    if receipt_date and receipt_date[:10] == day and len(receipt_date) > 10:
+        return receipt_date[:16]
+    if day == now.strftime("%Y-%m-%d"):
+        return f"{day} {now.strftime('%H:%M')}"
+    if warnings is not None:
+        warnings.append("no time given: 12:00 used (send 'time' or a full date-time)")
+    return f"{day} 12:00"
+
+
 def _truthy(v) -> bool:
     return str(v).strip().lower() in ("1", "true", "yes", "y", "on", "是")
 
@@ -164,7 +205,7 @@ def create(db: Database, body: dict, files: list[tuple[bytes, str]] | None = Non
         if amount < 0:
             amount = -amount  # agents often send spending as negative
         tx: dict[str, Any] = {"kind": kind, "amount": amount, "account_id": acct["id"], "source": "agent",
-                              "date": b.get("date") or (parsed.get("date") if saved else None) or datetime.now().strftime("%Y-%m-%d %H:%M"),
+                              "date": tx_when(b.get("date"), b.get("time"), parsed.get("date") if saved else None, warnings),
                               "note": b.get("note") or "", "status": "review" if _truthy(b.get("review")) else "posted"}
         if b.get("currency"):
             tx["currency"] = str(b["currency"]).upper()
