@@ -46,7 +46,14 @@ PRESET_RULES: list[dict[str, Any]] = [
      "note": "中国银行卡/信用卡动账短信或邮件, e.g. 您尾号1234的信用卡…消费人民币35.00元 (best effort)"},
 ]
 
-RULE_KINDS = ("auto", "expense", "income", "refund", "balance", "hold", "bill", "bill_paid")
+RULE_KINDS = ("auto", "expense", "income", "refund", "balance", "hold", "bill", "bill_paid", "schedule_post", "schedule_new",
+              "loan_payment", "credit", "reward_balance")
+# kinds that make something other than a plain transaction (see app/email_actions.py); a rule of these kinds also uses
+# date_regex (due / scheduled / payment / expiry date), payee (fixed payee / title), account_id and target_id
+ACTION_KINDS = ("bill", "bill_paid", "schedule_post", "schedule_new", "loan_payment", "credit", "reward_balance")
+# kinds whose target_id must name a row: schedule_post -> schedules, loan_payment -> loans, reward_balance -> rewards
+TARGET_TABLES = {"schedule_post": "schedules", "loan_payment": "loans", "reward_balance": "rewards"}
+POINTS_RX = r"([\d,]+)\s*(?:miles|points|pts|avios|里程|积分)"
 # kind "bill": a bill / payment request -> a payment task (Bills) with a reminder; "bill_paid": a payment confirmation
 # -> matched to the open bill (or kept for review). With "auto" these are detected by bills.classify().
 # kind "hold": a card authorization / pre-authorization alert -> a card-hold Reserve (预授权) in the review queue
@@ -147,6 +154,13 @@ def apply_rule(rule: dict, text: str) -> dict:
     out["kind"] = detect_kind(text) if kind == "auto" else kind
     if out["kind"] == "balance":
         out["adjust_reason"] = rule.get("adjust_reason") or None
+    if out["kind"] in ACTION_KINDS:
+        out.update(rule_id=rule.get("id"), date_text=_search(rule.get("date_regex", ""), text),
+                   payee=(rule.get("payee") or "").strip() or None, rule_account_id=rule.get("account_id") or None,
+                   target_id=rule.get("target_id") or None, rule_amount=out["amount"], rule_currency=out["currency"])
+    if out["kind"] == "reward_balance" and rule.get("amount_regex"):  # a points balance: no cents, no currency
+        v = _search(rule["amount_regex"], text)
+        out["amount"] = _to_float(v) if v else None
     return out
 
 
@@ -176,13 +190,17 @@ def parse_email(sender: str, subject: str, body: str, rules: list[dict]) -> dict
     for rule in sorted(rules, key=lambda r: (r.get("priority") or 100, r.get("id") or 0)):
         if rule_matches(rule, sender, subject):
             result = apply_rule(rule, text)
-            if result["amount"] is not None:
+            if result["amount"] is not None or result["kind"] in ACTION_KINDS:
                 break
     gen = generic_extract(text)
     if result is None:
         result = gen
     elif result["kind"] == "balance":  # statement balance: only the rule's own amount/last4 count
         pass
+    elif result["kind"] == "reward_balance":  # miles / points: never a money amount
+        if result.get("amount") is None:
+            result["amount"] = _to_float(_search(POINTS_RX, text))
+        result["currency"] = None
     else:  # fill gaps from the generic extractor
         for k in ("amount", "merchant", "last4", "currency"):
             if not result.get(k) and gen.get(k):

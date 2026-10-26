@@ -595,17 +595,64 @@ def _apply_match(con, bill_id: int, pay: dict, how: str) -> None:
 
 
 # ------------------------------------------------------------------ email entry point
+def apply_overrides(p: dict, ov: dict | None) -> dict:
+    """What a parsing rule fixes on top of the automatic parse: payee, amount, date_text (due date of a bill / payment
+    date of a confirmation, from the rule's date regex) and account_id (the account the bill is paid from)."""
+    ov = ov or {}
+    if ov.get("payee"):
+        p["payee"] = str(ov["payee"]).strip()[:120]
+    if ov.get("amount") is not None:
+        p["amount"] = ov["amount"]
+    if ov.get("currency"):
+        p["currency"] = ov["currency"]
+    if ov.get("date_text"):
+        d = parse_date_text(ov["date_text"], _as_date(p.get("email_date")) or date.today())
+        if d:
+            p["due_date" if p["type"] == "bill" else "paid_date"] = d.isoformat()
+    if ov.get("account_id"):
+        p["account_id"] = int(ov["account_id"])
+    return p
+
+
 def handle_email(db: Database, sender: str, subject: str, body: str, received: str | None, message_id: str,
-                 rule_kind: str | None = None) -> dict | None:
+                 rule_kind: str | None = None, overrides: dict | None = None, dry_run: bool = False) -> dict | None:
     """Called by ingest for each new email. Returns None when the email is neither a bill nor a payment confirmation;
-    otherwise {type, action, stop, ...}. stop=True: the email is fully handled (no transaction should be made)."""
+    otherwise {type, action, stop, ...}. stop=True: the email is fully handled (no transaction should be made).
+    overrides: the parsing rule's fixed fields (see apply_overrides). dry_run: what would happen, nothing written."""
     kind = {"bill": "bill", "bill_paid": "paid"}.get(rule_kind or "")
-    p = parse_bill_email(sender, subject, body, received, kind)
+    p = apply_overrides(parse_bill_email(sender, subject, body, received, kind), overrides)
+    if dry_run:
+        return preview(db, p) if p["type"] else None
     if p["type"] == "bill":
         return _handle_bill(db, p, sender, subject, body, message_id)
     if p["type"] == "paid":
         return _handle_paid(db, p, subject, message_id, forced=bool(kind))
     return None
+
+
+def _same_open_bill(db: Database, p: dict) -> dict | None:
+    for b in db.all("SELECT * FROM bills WHERE status='open'"):
+        if payee_matches(p["payee"], b["payee"]) and (b["due_date"] or None) == p["due_date"] and \
+                (b["amount"] is None or p["amount"] is None or abs(b["amount"] - p["amount"]) < EPS):
+            return b
+    return None
+
+
+def preview(db: Database, p: dict) -> dict:
+    """Dry run of handle_email for the rule tester: {type, action, parsed, bill?, candidates?, reason?}."""
+    out = {"type": p["type"], "parsed": p}
+    if p["type"] == "bill":
+        if not p["payee"]:
+            return {**out, "action": "skipped", "reason": "no payee found"}
+        if p["amount"] is None and not p["due_date"]:
+            return {**out, "action": "skipped", "reason": "no amount or due date found"}
+        ex = _same_open_bill(db, p)
+        return {**out, "action": "existing", "bill": get(db, ex["id"])} if ex else {**out, "action": "create"}
+    m = match_payment(db, p)
+    out.update(action=m["status"], candidates=[c["id"] for c in m["candidates"]], reason=m.get("reason"))
+    if m["status"] == "matched":
+        out["bill"] = get(db, m["bill"]["id"])
+    return out
 
 
 def _handle_bill(db: Database, p: dict, sender: str, subject: str, body: str, mid: str) -> dict:
@@ -614,17 +661,16 @@ def _handle_bill(db: Database, p: dict, sender: str, subject: str, body: str, mi
     if p["amount"] is None and not p["due_date"]:
         return {"type": "bill", "action": "skipped", "stop": False, "parsed": p, "reason": "no amount or due date found"}
     # the same bill again (a reminder email for a bill we already have): link instead of duplicating
-    for b in db.all("SELECT * FROM bills WHERE status='open'"):
-        if payee_matches(p["payee"], b["payee"]) and (b["due_date"] or None) == p["due_date"] and \
-                (b["amount"] is None or p["amount"] is None or abs(b["amount"] - p["amount"]) < EPS):
-            if b["amount"] is None and p["amount"] is not None:
-                with db.tx() as con:
-                    con.execute("UPDATE bills SET amount=?, currency=COALESCE(currency, ?), updated_at=? WHERE id=?",
-                                (p["amount"], p["currency"], now_iso(), b["id"]))
-                _sync(db)
-            return {"type": "bill", "action": "existing", "stop": True, "parsed": p, "bill": get(db, b["id"])}
+    b = _same_open_bill(db, p)
+    if b:
+        if b["amount"] is None and p["amount"] is not None:
+            with db.tx() as con:
+                con.execute("UPDATE bills SET amount=?, currency=COALESCE(currency, ?), updated_at=? WHERE id=?",
+                            (p["amount"], p["currency"], now_iso(), b["id"]))
+            _sync(db)
+        return {"type": "bill", "action": "existing", "stop": True, "parsed": p, "bill": get(db, b["id"])}
     bill = create(db, {"payee": p["payee"], "amount": p["amount"], "currency": p["currency"], "due_date": p["due_date"],
-                       "issued_date": p["email_date"], "reference": p["reference"]},
+                       "issued_date": p["email_date"], "reference": p["reference"], "account_id": p.get("account_id")},
                   {"source": "email", "message_id": mid, "sender": (sender or "")[:200], "sender_domain": p["sender_domain"],
                    "subject": (subject or "")[:300], "raw_text": (body or "")[:4000]})
     return {"type": "bill", "action": "created", "stop": True, "parsed": p, "bill": bill}

@@ -107,19 +107,19 @@ SET.email = async (el) => {
   el.innerHTML = `<div class="card"><h3>Mailboxes to watch<span class="sp"></span><button class="btn sm pri" id="addMb">+ Add mailbox</button></h3>
    <p class="small muted">The app polls these via IMAP, filters by sender allowlist / subject keywords, dedupes by Message-ID, parses amounts with the rules below and puts results in <a href="#/review">To review</a> (or posts them when auto-post is on and confidence ≥ threshold). Passwords are encrypted at rest with <code>data/secret.key</code> and never shown again. Use an <b>app password</b> (Gmail: imap.gmail.com:993, Google Account → Security → App passwords).</p>
    ${mbs.length ? `<div class="scroll-x"><table class="t"><thead><tr><th>Name</th><th>Server / user</th><th>Folder</th><th>Schedule</th><th>Filters</th><th>Last run</th><th></th></tr></thead><tbody>${mbs.map(m => `<tr>
-    <td><b>${esc(m.name)}</b><div class="small">${m.enabled ? '<span class="pill income">enabled</span>' : '<span class="pill">disabled</span>'} ${m.auto_post ? '<span class="pill transfer">auto-post</span>' : ''}</div></td>
+    <td><b>${esc(m.name)}</b><div class="small">${m.enabled ? '<span class="pill income">enabled</span>' : '<span class="pill">disabled</span>'} ${m.auto_post ? '<span class="pill transfer">auto-post</span>' : ''} ${m.watch_rules ? '<span class="pill" title="Also takes emails a bill / schedule / loan / credit / points rule targets, and bill-looking emails, outside its sender / subject filter">+ bills & rules</span>' : ''}</div></td>
     <td class="small">${esc(m.host)}:${m.port} ${m.use_ssl ? 'SSL' : ''}<div class="muted">${esc(m.username)} · pw ${m.password_set ? '•••••• (set)' : '⚠ not set'}</div></td><td class="small">${esc(m.folder)}${m.after_action !== 'none' ? `<div class="muted">then ${m.after_action === 'move' ? 'move → ' + esc(m.move_folder) : 'mark read'}</div>` : ''}</td>
     <td class="small">${m.schedule_mode === 'fixed' ? '🕘 Fixed times' : '🔁 Interval'}<div>${esc(m.schedule_text || '')}</div><div class="muted">Next: ${m.enabled ? esc(m.next_run || '—') : 'disabled'}${m.schedule_mode === 'fixed' ? ` <span title="App time zone (Settings)">(${esc(m.timezone || '')})</span>` : ''}</div></td><td class="small muted">${esc(m.sender_allowlist || 'any sender')}${m.subject_keywords ? '<br>subj: ' + esc(m.subject_keywords) : ''}</td>
     <td class="small muted">${esc(m.last_checked_at || 'never')}<div>${esc(m.last_status || '')}</div></td>
     <td class="nowrap"><button class="btn sm" data-test="${m.id}">Test connection</button> <button class="btn sm" data-run="${m.id}">Check now</button> <button class="btn sm" data-edit="${m.id}">Edit</button> <button class="btn sm danger" data-del="${m.id}">✕</button></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No mailboxes yet.</div>'}</div>
   <div class="card" style="margin-top:16px"><h3>Parsing rules (per sender)<span class="sp"></span><button class="btn sm" id="testRules">Test with a sample email</button><button class="btn sm" id="tplRule">From template</button><button class="btn sm pri" id="addRule">+ Add rule</button></h3>
    <p class="small muted">Rules are tried by priority (lower first) when the sender (and optional subject) regex matches. Each regex's first non-empty capture group is used. Presets are best effort — alert wording changes; edit them freely. Anything unmatched falls back to a generic extractor.</p>
-   <div class="scroll-x"><table class="t"><thead><tr><th>Pri</th><th>Name</th><th>Sender regex</th><th>Kind</th><th>Enabled</th><th></th></tr></thead><tbody>${rules.map(r => `<tr><td>${r.priority}</td><td><b>${esc(r.name)}</b>${r.is_preset ? ' <span class="pill">preset</span>' : ''}<div class="small muted">${esc(r.note || '')}</div></td><td class="mono small">${esc(r.sender_pattern)}${r.subject_pattern ? '<br>subj: ' + esc(r.subject_pattern) : ''}</td><td>${r.kind === 'balance' ? `Balance adjust<div class="small muted">${esc(r.adjust_reason ? (REASON_NAMES[r.adjust_reason] || r.adjust_reason) : 'account default')}</div>` : esc(r.kind)}</td>
+   <div class="scroll-x"><table class="t"><thead><tr><th>Pri</th><th>Name</th><th>Sender regex</th><th>Kind</th><th>Enabled</th><th></th></tr></thead><tbody>${rules.map(r => `<tr><td>${r.priority}</td><td><b>${esc(r.name)}</b>${r.is_preset ? ' <span class="pill">preset</span>' : ''}<div class="small muted">${esc(r.note || '')}</div></td><td class="mono small">${esc(r.sender_pattern)}${r.subject_pattern ? '<br>subj: ' + esc(r.subject_pattern) : ''}</td><td>${r.kind === 'balance' ? `Balance adjust<div class="small muted">${esc(r.adjust_reason ? (REASON_NAMES[r.adjust_reason] || r.adjust_reason) : 'account default')}</div>` : esc(KIND_NAMES[r.kind] || r.kind)}</td>
      <td><input type="checkbox" data-en="${r.id}" ${r.enabled ? 'checked' : ''}></td><td class="nowrap"><button class="btn sm" data-er="${r.id}">Edit</button> <button class="btn sm danger" data-dr="${r.id}">✕</button></td></tr>`).join('')}</tbody></table></div></div>
   <div class="card" style="margin-top:16px"><h3>Ingest log<span class="sp"></span><button class="btn sm" onclick="route()">↻</button></h3>
-   ${logs.length ? `<div class="scroll-x"><table class="t"><thead><tr><th>Time</th><th>Via</th><th>Sender</th><th>Subject</th><th>Result</th><th>Detail</th><th>Txn</th></tr></thead><tbody>${logs.map(l => `<tr><td class="small nowrap">${esc(l.time)}</td><td class="small">${esc(l.mailbox_name || l.source)}</td><td class="small">${esc((l.sender || '').slice(0, 40))}</td><td class="small">${esc((l.subject || '').slice(0, 60))}</td>
-    <td><span class="pill ${l.result === 'posted' ? 'income' : l.result === 'review' ? 'review' : l.result === 'error' ? 'expense' : ''}">${esc(l.result)}</span> ${confPill(l.confidence)}</td><td class="small muted">${esc((l.detail || '').slice(0, 120))}${l.rule_name ? ' · rule ' + esc(l.rule_name) : ''}</td>
-    <td>${l.transaction_id ? (l.tx_status ? `<a href="javascript:openTx(${l.transaction_id})">#${l.transaction_id}</a> <span class="small muted">${esc(l.tx_status)}</span>` : `<span class="small muted">#${l.transaction_id} (deleted)</span>`) : ''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Nothing ingested yet. POST /api/ingest/email or add a mailbox.</div>'}</div>`;
+   ${logs.length ? `<div class="scroll-x"><table class="t"><thead><tr><th>Time</th><th>Via</th><th>Sender</th><th>Subject</th><th>Result</th><th>Detail</th><th>Txn / item</th></tr></thead><tbody>${logs.map(l => `<tr><td class="small nowrap">${esc(l.time)}</td><td class="small">${esc(l.mailbox_name || l.source)}</td><td class="small">${esc((l.sender || '').slice(0, 40))}</td><td class="small">${esc((l.subject || '').slice(0, 60))}</td>
+    <td><span class="pill ${l.result === 'posted' ? 'income' : l.result === 'review' ? 'review' : l.result === 'error' ? 'expense' : LOG_RESULTS[l.result] ? 'transfer' : ''}">${esc(LOG_RESULTS[l.result] || l.result)}</span> ${confPill(l.confidence)}</td><td class="small muted">${esc((l.detail || '').slice(0, 120))}${l.rule_name ? ' · rule ' + esc(l.rule_name) : ''}</td>
+    <td class="nowrap">${l.transaction_id ? (l.tx_status ? `<a href="javascript:openTx(${l.transaction_id})">#${l.transaction_id}</a> <span class="small muted">${esc(l.tx_status)}</span>` : `<span class="small muted">#${l.transaction_id} (deleted)</span>`) : ''} ${logRefLink(l)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Nothing ingested yet. POST /api/ingest/email or add a mailbox.</div>'}</div>`;
   $('#addMb').onclick = () => mailboxForm();
   $$('[data-edit]', el).forEach(b => b.onclick = () => mailboxForm(mbs.find(m => m.id == b.dataset.edit)));
   $$('[data-del]', el).forEach(b => b.onclick = async () => { if (!await confirmBox('Delete this mailbox?')) return; await api('/api/mailboxes/' + b.dataset.del, {method: 'DELETE'}); route(); });
@@ -158,11 +158,12 @@ function mailboxForm(m) {
    <label class="f"><span>Look back (days) on each poll</span><input name="lookback_days" type="number" min="1" value="${m.lookback_days || 7}"></label>
    <label class="chk"><input type="checkbox" name="enabled" ${m.enabled ? 'checked' : ''}> Enabled</label>
    <label class="chk"><input type="checkbox" name="auto_post" ${m.auto_post ? 'checked' : ''}> Auto-post high-confidence results (otherwise everything goes to review)</label>
+   <label class="chk full"><input type="checkbox" name="watch_rules" ${m.watch_rules ? 'checked' : ''}> Also watch for bills and rule actions: take emails outside the sender / subject filter above when a bill, schedule, loan, credit or miles & points rule matches them, or when the subject reads like a bill or a payment confirmation (those only ever become bills, never transactions)</label>
    <div class="full small" id="mtest"></div></form>`, {wide: true, buttons: `<button class="btn" data-t>Test connection</button><span class="sp"></span><button class="btn" data-x3>Cancel</button><button class="btn pri" data-ok>Save</button>`});
   const f = $('#mf', bg);
   const smShow = () => $$('[data-sm]', bg).forEach(x => { x.hidden = x.dataset.sm !== f.schedule_mode.value; });
   f.schedule_mode.onchange = smShow; smShow();
-  const collect = () => { const o = Object.fromEntries(new FormData(f)); ['use_ssl', 'enabled', 'auto_post'].forEach(k => o[k] = f[k].checked ? 1 : 0); if (!o.password) delete o.password;
+  const collect = () => { const o = Object.fromEntries(new FormData(f)); ['use_ssl', 'enabled', 'auto_post', 'watch_rules'].forEach(k => o[k] = f[k].checked ? 1 : 0); if (!o.password) delete o.password;
     o.schedule_weekdays = $$('[data-wd]', bg).filter(c => c.checked).map(c => c.dataset.wd).join(','); return o; };
   $('[data-x3]', bg).onclick = bg.close;
   $('[data-t]', bg).onclick = async () => { $('#mtest', bg).textContent = 'Testing…'; const o = collect(); if (!isNew) o.id = m.id;
@@ -170,7 +171,37 @@ function mailboxForm(m) {
   $('[data-ok]', bg).onclick = async () => { await guard(() => api(isNew ? '/api/mailboxes' : '/api/mailboxes/' + m.id, {method: isNew ? 'POST' : 'PUT', body: collect()})); bg.close(); toast('Saved'); route(); };
 }
 const REASON_NAMES = {investment_gain: 'Gain/loss', interest: 'Interest', fees: 'Fees', unrecorded_spending: 'Unrecorded spending', unrecorded_income: 'Unrecorded income', correction: 'Correction/other', opening: 'Opening balance'};
-const KIND_NAMES = {auto: 'auto', expense: 'expense', income: 'income', refund: 'refund', balance: 'Balance adjust', hold: 'Card hold → Reserve'};
+const KIND_NAMES = {auto: 'auto', expense: 'expense', income: 'income', refund: 'refund', balance: 'Balance adjust', hold: 'Card hold → Reserve',
+  bill: 'Bill → Bills', bill_paid: 'Bill paid (confirmation)', schedule_post: 'Post a scheduled item', schedule_new: 'New one-time schedule',
+  loan_payment: 'Loan payment', credit: 'Credit', reward_balance: 'Miles & points balance'};
+/* per action kind: which extra rule fields show, and what they mean (date regex / payee / account / target) */
+const RULE_ACTIONS = {
+  bill: {date: 'Due date regex (blank = detect)', payee: 'Payee (blank = from the email)', acct: 'Pay from account (optional)',
+    hint: '🧾 A bill or payment request: it becomes a payment task in Bills with a reminder before the due date. No transaction is recorded.'},
+  bill_paid: {date: 'Payment date regex (blank = detect / email date)', payee: 'Payee (blank = from the email)',
+    hint: '✅ A payment confirmation: it marks the matching open bill paid, or waits in Bills → Payments to review.'},
+  schedule_post: {date: 'Date regex (optional: which occurrence)', acct: "Account (blank = the schedule's)", target: 'schedules', tlabel: 'Scheduled item',
+    hint: "🔁 The email is this scheduled item happening (e.g. a paycheck alert): the occurrence nearest the email date is posted with the email's amount and marked done, so it is never posted twice. Already posted: nothing new."},
+  schedule_new: {date: 'Scheduled date regex (blank = detect)', payee: 'Name / payee (blank = from the email)', acct: 'Account (blank = mailbox default)',
+    hint: '🗓 A future charge (autopay scheduled, subscription renews …): a one-time scheduled item on that date with a reminder; nothing is posted until it happens.'},
+  loan_payment: {date: 'Payment date regex (blank = email date)', acct: "Paid from / into (blank = the loan's)", target: 'loans', tlabel: 'Loan',
+    hint: "🤝 A loan payment: recorded on the loan in Loan Center, split into principal / interest / escrow (blank amount = the expected payment). A loan with its own schedule posts that installment."},
+  credit: {date: 'Expiry date regex (blank = detect)', payee: 'Issuer / title (blank = sender)', acct: 'Card (optional)',
+    hint: '🎟 A travel / store credit: it is added to Credits with its expiry date.'},
+  reward_balance: {date: 'Expiry date regex (blank = detect)', target: 'rewards', tlabel: 'Miles & points program',
+    hint: '✈️ A miles / points statement: the amount regex finds the balance (blank = a number followed by miles / points); the program is updated.'},
+};
+const LOG_RESULTS = {bill: 'bill', bill_paid: 'bill paid', schedule_post: 'schedule posted', schedule_new: 'schedule added',
+  loan_payment: 'loan payment', credit: 'credit', reward_balance: 'points'};
+function logRefLink(l) {
+  const go = {bill: '#/bills', schedule: '#/scheduled', credit: '#/credits', reward: '#/credits/rewards'}[l.ref_kind];
+  if (l.ref_kind === 'loan' && l.ref_id) return `<a href="javascript:openLoan(${l.ref_id})">🤝 #${l.ref_id}</a>`;
+  return go ? `<a href="${go}">${{bill: '🧾', schedule: '🔁', credit: '🎟', reward: '✈️'}[l.ref_kind]} #${l.ref_id || ''}</a>` : '';
+}
+function actionPreviewTxt(a) {
+  if (!a) return '';
+  return (a.action === 'skipped' ? '⚠️ ' : '➡️ ') + a.detail + (a.action === 'skipped' ? ' → it would become a transaction to review' : '');
+}
 function balancePreviewTxt(p) {
   if (!p) return '';
   if (!p.ok) return `⚠️ ${p.problem}`;
@@ -189,6 +220,11 @@ function ruleForm(r, tpl) {
    <label class="f full"><span>Merchant regex</span><input class="mono" name="merchant_regex" value="${esc(r.merchant_regex || '')}"></label>
    <label class="f"><span>Last-4 regex</span><input class="mono" name="last4_regex" value="${esc(r.last4_regex || '')}" placeholder="ending in (\\d{4})"></label>
    <label class="f"><span>Kind</span><select name="kind">${Object.entries(KIND_NAMES).map(([k, l]) => `<option value="${k}" ${r.kind === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+   <div class="f full small muted" id="rfAct" hidden></div>
+   <label class="f" data-ak="date"><span data-akl>Date regex</span><input class="mono" name="date_regex" value="${esc(r.date_regex || '')}" placeholder="due (?:date|on)[:\\s]*([\\w/ ,-]+\\d)"></label>
+   <label class="f" data-ak="payee"><span data-akl>Payee</span><input name="payee" value="${esc(r.payee || '')}"></label>
+   <label class="f" data-ak="acct"><span data-akl>Account</span><select name="account_id">${acctOptions(r.account_id, {blank: '— auto —'})}</select></label>
+   <label class="f" data-ak="target"><span data-akl>Target</span><select name="target_id"><option value="">…</option></select></label>
    <div class="f full small muted" id="rfHold"${r.kind === 'hold' ? '' : ' hidden'}>🔒 A card authorization / pre-authorization alert: it becomes a card hold in Reserves to review (never a transaction). Authorization wording is also detected with kind auto.</div>
    <label class="f" id="rfReason"${r.kind === 'balance' ? '' : ' hidden'}><span>Adjustment reason</span><select name="adjust_reason"><option value="">Account default (gain/loss for investment accounts)</option>${Object.entries(REASON_NAMES).map(([k, l]) => `<option value="${k}" ${r.adjust_reason === k ? 'selected' : ''}>${l}</option>`).join('')}</select><span class="small muted">The amount found is the NEW account balance (statement value); the account is matched by its last 4 digits and the difference is recorded like Set balance, dated the email date.</span></label>
    <label class="f"><span>Enabled</span><select name="enabled"><option value="1" ${r.enabled ? 'selected' : ''}>Yes</option><option value="0" ${r.enabled ? '' : 'selected'}>No (disabled)</option></select></label>
@@ -197,14 +233,37 @@ function ruleForm(r, tpl) {
    <label class="f full"><span>Try it: paste a sample email body (the subject is included automatically)</span><textarea id="sample" placeholder="You made a $12.34 transaction with TEST MERCHANT on your card ending in 0000"></textarea></label>
    <div class="full"><button type="button" class="btn sm" id="tryR">Test this rule</button> <span id="tryOut" class="small mono"></span></div></form>`, {wide: true, buttons: '<button class="btn pri" data-ok>Save</button>'});
   const f = $('#rf2', bg);
-  f.kind.onchange = () => { $('#rfReason', bg).hidden = f.kind.value !== 'balance'; $('#rfHold', bg).hidden = f.kind.value !== 'hold'; };
+  const targets = {};
+  const loadTargets = async (what) => {
+    if (!targets[what]) targets[what] = await api({schedules: '/api/schedules', loans: '/api/loans?state=all', rewards: '/api/rewards'}[what]).then(d => (d.items || []).map(x =>
+      ({id: x.id, label: what === 'loans' ? x.label : what === 'rewards' ? `${x.name} (${Math.round(x.balance || 0).toLocaleString()} ${x.unit})` : `${x.name}${x.enabled ? '' : ' (paused)'}`})));
+    return targets[what];
+  };
+  const actShow = async () => {
+    const a = RULE_ACTIONS[f.kind.value];
+    $('#rfAct', bg).hidden = !a; if (a) $('#rfAct', bg).textContent = a.hint;
+    for (const k of ['date', 'payee', 'acct', 'target']) {
+      const box = $(`[data-ak="${k}"]`, bg), lab = a && (k === 'target' ? a.tlabel : a[k]);
+      box.hidden = !lab; if (lab) $('[data-akl]', box).textContent = lab;
+    }
+    if (a && a.target) {
+      const sel = f.target_id, want = sel.dataset.t === a.target ? sel.value : (RULE_ACTIONS[r.kind] || {}).target === a.target ? r.target_id || '' : '';
+      sel.dataset.t = a.target;
+      const list = await loadTargets(a.target);
+      sel.innerHTML = `<option value="">— choose —</option>` + list.map(x => `<option value="${x.id}" ${String(x.id) === String(want) ? 'selected' : ''}>${esc(x.label)}</option>`).join('');
+    }
+  };
+  f.kind.onchange = () => { $('#rfReason', bg).hidden = f.kind.value !== 'balance'; $('#rfHold', bg).hidden = f.kind.value !== 'hold'; actShow(); };
+  actShow();
   $('#tryR', bg).onclick = async () => { const rule = Object.fromEntries(new FormData(f)); const res = await guard(() => api('/api/email-rules/test', {method: 'POST', body: {from: (rule.sender_pattern || '').replace(/\\/g, ''), subject: '', body: $('#sample', bg).value, rule}}));
-    const bp = res.balance_preview; delete res.balance_preview; $('#tryOut', bg).textContent = (bp ? '🧮 ' + balancePreviewTxt(bp) + '\n' : '') + JSON.stringify(res); };
+    const bp = res.balance_preview, ap = res.action_preview; delete res.balance_preview; delete res.action_preview;
+    $('#tryOut', bg).textContent = (bp ? '🧮 ' + balancePreviewTxt(bp) + '\n' : '') + (ap ? actionPreviewTxt(ap) + '\n' : '') + JSON.stringify(res); };
   $('[data-ok]', bg).onclick = async () => { await guard(() => api(isNew ? '/api/email-rules' : '/api/email-rules/' + r.id, {method: isNew ? 'POST' : 'PUT', body: Object.fromEntries(new FormData(f))})); bg.close(); route(); };
 }
 function ruleTester() {
   const bg = modal('Test parsing rules with a sample email', `<form class="form" id="tf"><label class="f"><span>From</span><input name="from" placeholder="no-reply@alerts.chase.com"></label><label class="f"><span>Subject</span><input name="subject"></label><label class="f full"><span>Body (text or HTML)</span><textarea name="body" style="min-height:140px"></textarea></label></form><pre id="tout" class="small"></pre>`, {wide: true, buttons: '<button class="btn" data-ingest>Ingest into review inbox</button><button class="btn pri" data-ok>Parse</button>'});
   const f = $('#tf', bg);
-  $('[data-ok]', bg).onclick = async () => { const res = await guard(() => api('/api/email-rules/test', {method: 'POST', body: Object.fromEntries(new FormData(f))})); $('#tout', bg).textContent = (res.balance_preview ? '🧮 Adjustment preview: ' + balancePreviewTxt(res.balance_preview) + '\n\n' : '') + JSON.stringify(res, null, 2); };
-  $('[data-ingest]', bg).onclick = async () => { const r = await guard(() => api('/api/ingest/email', {method: 'POST', body: Object.fromEntries(new FormData(f))})); $('#tout', bg).textContent = JSON.stringify({result: r.result, confidence: r.confidence, reasons: r.reasons, transaction_id: r.transaction && r.transaction.id}, null, 2); loadMeta(); };
+  $('[data-ok]', bg).onclick = async () => { const res = await guard(() => api('/api/email-rules/test', {method: 'POST', body: Object.fromEntries(new FormData(f))})); const ap = res.action_preview; delete res.action_preview;
+    $('#tout', bg).textContent = (res.balance_preview ? '🧮 Adjustment preview: ' + balancePreviewTxt(res.balance_preview) + '\n\n' : '') + (ap ? actionPreviewTxt(ap) + '\n\n' : '') + JSON.stringify(res, null, 2); };
+  $('[data-ingest]', bg).onclick = async () => { const r = await guard(() => api('/api/ingest/email', {method: 'POST', body: Object.fromEntries(new FormData(f))})); $('#tout', bg).textContent = (r.detail ? '➡️ ' + r.detail + '\n\n' : '') + JSON.stringify({result: r.result, action: r.action, confidence: r.confidence, reasons: r.reasons, transaction_id: r.transaction && r.transaction.id, bill_id: r.bill && r.bill.id, ref: r.ref_kind ? r.ref_kind + ' #' + r.ref_id : undefined}, null, 2); loadMeta(); };
 }
