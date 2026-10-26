@@ -382,6 +382,11 @@ def mark_paid(db: Database, rid: int, body: dict) -> dict:
             tx = ledger.create_tx(db, {"kind": "transfer", "account_id": int(body["from_account_id"]), "to_account_id": r["account_id"],
                                        "amount": amount, "date": when, "note": f"Card payment 还款 · {r['title']}"
                                        + (f" · {r['reference']}" if r.get("reference") else ""), "source": "reminder"})
+        elif r.get("schedule_id") and r.get("occurrence_date") and db.one("SELECT 1 x FROM schedules WHERE id=?", (r["schedule_id"],)):
+            # the schedule's occurrence: posted with its template and marked done (closes this reminder too)
+            from . import schedules
+            tx = schedules.post_occurrence(db, r["schedule_id"], {"occurrence_date": r["occurrence_date"], "amount": amount, "date": when,
+                                                                  "account_id": body.get("from_account_id")}, check=False)["transaction"]
         else:
             s = db.one("SELECT template, name FROM schedules WHERE id=?", (r["schedule_id"],))
             tpl = json.loads(s["template"]) if s else {}
