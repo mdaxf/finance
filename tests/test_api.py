@@ -84,10 +84,13 @@ def test_email_ingest_creates_review_and_dedupes(client, accounts):
     assert t["date"].startswith("2026-10-10") and t["source"] == "email"
     assert client.post("/api/ingest/email", json=msg).json()["result"] == "duplicate"
     # auto_post when confident
-    msg2 = dict(msg, message_id="<fake-2@example.test>", auto_post=True)
+    # the same purchase again under another message id: a likely duplicate, skipped
+    same = client.post("/api/ingest/email", json=dict(msg, message_id="<fake-1b@example.test>")).json()
+    assert same["result"] == "similar" and same["similar_to"] == t["id"]
+    msg2 = dict(msg, message_id="<fake-2@example.test>", received_at="2026-10-11T08:15:00", auto_post=True)
     assert client.post("/api/ingest/email", json=msg2).json()["result"] == "posted"
     log = client.get("/api/ingest-log").json()
-    assert [l["result"] for l in log][:3] == ["posted", "duplicate", "review"]
+    assert [l["result"] for l in log][:4] == ["posted", "similar", "duplicate", "review"]
     # non-financial mail is skipped
     r = client.post("/api/ingest/email", json={"from": "x@y.test", "subject": "hello", "body": "no money here"}).json()
     assert r["created"] is False

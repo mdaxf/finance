@@ -559,6 +559,9 @@ def normalize_tx(con, data: dict, rates: dict[str, float], existing: dict | None
 
 def create_tx(db: Database, data: dict) -> dict:
     rates = fx_rates(db)
+    d = str(data.get("date") or "").strip()
+    if len(d) == 10 and d == datetime.now().strftime("%Y-%m-%d"):  # today without a time: now, not 12:00
+        data = {**data, "date": datetime.now().strftime("%Y-%m-%d %H:%M")}
     with db.tx() as con:
         tx = normalize_tx(con, data, rates)
         tx["updated_at"] = tx["created_at"] = now_iso()

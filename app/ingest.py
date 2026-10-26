@@ -599,6 +599,78 @@ def _ingest_balance(db: Database, ex: dict, msg: dict, mid: str, logbase: dict, 
             "balance": plan, "transaction": tx}
 
 
+SIMILAR_MINUTES = 60
+TIP_RATIO = 1.35  # a meal / taxi charge first posted without the tip, then settled up to ~35% higher
+_MSTOP = {"the", "and", "for", "card", "your", "you", "account", "payment", "purchase", "transaction", "inc", "llc",
+          "ltd", "com", "www", "store", "online", "usd", "debit", "credit", "pos", "ach", "from", "with"}
+
+
+def _mtokens(s: str | None) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9一-鿿]{3,}", (s or "").lower()) if w not in _MSTOP and not w.isdigit()}
+
+
+def _parse_dt(s: str) -> tuple[datetime | None, bool]:
+    """(datetime, has_time). 00:00 and 12:00 count as a date only: bank imports carry no time and are stored at 12:00."""
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+        try:
+            d = datetime.strptime(s[:len(datetime(2000, 1, 1).strftime(fmt))], fmt)
+            return d, (d.hour, d.minute) not in ((0, 0), (12, 0))
+        except ValueError:
+            continue
+    return None, False
+
+
+def find_similar(db: Database, kind: str, amount, currency: str | None, account_id, to_account_id,
+                 date_s: str | None, merchant: str | None) -> dict | None:
+    """An existing transaction that looks like the one an email is about to create: same amount (±0.01) and currency
+    on the same account (either side), the same day, and a matching merchant / payee. With a matching merchant the
+    amounts may also differ by up to TIP_RATIO (first charge without the tip, then the final one) -> review only.
+    tier 'skip'   = within SIMILAR_MINUTES and the merchant matches -> the email is skipped;
+    tier 'review' = only the same day, or the email names no merchant -> created in To review at low confidence."""
+    accts = [a for a in (account_id, to_account_id) if a]
+    if not amount or not accts:
+        return None
+    when, has_time = _parse_dt(date_s or now_iso())
+    if when is None:
+        return None
+    mine = _mtokens(merchant)
+    ph = ",".join("?" * len(accts))
+    rows = db.all(f"""SELECT t.id, t.date, t.amount, t.currency, t.kind, t.note, t.raw_text, m.name merchant_name
+        FROM transactions t LEFT JOIN merchants m ON m.id=t.merchant_id
+        WHERE t.date >= ? AND t.date < ? AND abs(t.amount) BETWEEN ? AND ?
+          AND (t.account_id IN ({ph}) OR t.to_account_id IN ({ph}))""",
+                  ((when - timedelta(days=1)).strftime("%Y-%m-%d"), (when + timedelta(days=2)).strftime("%Y-%m-%d"),
+                   abs(float(amount)) / TIP_RATIO - 0.006, abs(float(amount)) * TIP_RATIO + 0.006, *accts, *accts))
+    best = None
+    for r in rows:
+        if currency and r["currency"] and r["currency"].upper() != currency.upper():
+            continue
+        if r["kind"] != kind and "transfer" not in (r["kind"], kind):
+            continue
+        d, t_time = _parse_dt(r["date"])
+        if d is None:
+            continue
+        close = has_time and t_time and abs((d - when).total_seconds()) <= SIMILAR_MINUTES * 60
+        if not close and d.date() != when.date():
+            continue
+        theirs = _mtokens(f"{r['merchant_name'] or ''} {r['note'] or ''} {(r['raw_text'] or '')[:500]}")
+        if mine and len(mine & theirs) * 3 < len(mine) * 2:  # most of the email's merchant words must match
+            continue  # a different merchant: two real purchases of the same amount
+        diff = abs(float(amount)) - abs(r["amount"])
+        exact = abs(diff) < 0.006
+        if not exact and not mine:
+            continue  # a different amount counts only when the merchant matches
+        tier = "skip" if (close and mine and exact) else "review"
+        label = r["merchant_name"] or (r["note"] or "")[:40]
+        why = f"{r['date'][:16]} {abs(r['amount']):,.2f} {r['currency']}" + (f" {label}" if label else "")
+        if not exact:
+            why += f"; this email is {diff:+,.2f}, maybe a tip"
+        cand = {"id": r["id"], "tier": tier, "why": why, "gap": abs((d - when).total_seconds()), "exact": exact}
+        if best is None or (tier == "skip", exact, -cand["gap"]) > (best["tier"] == "skip", best["exact"], -best["gap"]):
+            best = cand
+    return best
+
+
 def ingest_email(db: Database, msg: dict, mailbox: dict | None = None, auto_post: bool | None = None,
                  source: str = "email", bills_only: bool = False) -> dict:
     """msg: {from, subject, body, received_at, message_id?}. Returns result dict.
@@ -722,6 +794,16 @@ def ingest_email(db: Database, msg: dict, mailbox: dict | None = None, auto_post
                 date_s = email.utils.parsedate_to_datetime(msg["received_at"]).astimezone().strftime("%Y-%m-%d %H:%M")
             except Exception:
                 date_s = None
+    sim = find_similar(db, kind, ex["amount"], ex.get("currency"), account_id, to_account_id, date_s, ex.get("merchant"))
+    if sim and sim["tier"] == "skip":
+        detail = f"likely a duplicate of #{sim['id']} ({sim['why']}): skipped"
+        _log(db, **logbase, result="similar", detail=detail, rule_name=ex.get("rule_name"), transaction_id=sim["id"])
+        ex.pop("text", None)
+        return {"created": False, "result": "similar", "similar_to": sim["id"], "detail": detail, "extracted": ex}
+    if sim:
+        conf = min(conf, 0.3)
+        status = "review"
+        reasons.append(f"possible duplicate of #{sim['id']} ({sim['why']})")
     data = {"kind": kind, "date": date_s, "amount": ex["amount"], "currency": ex.get("currency"),
             "account_id": account_id, "to_account_id": to_account_id, "category_id": cat_id,
             "merchant": ex.get("merchant"), "note": f"{subject}".strip()[:200], "source": source,

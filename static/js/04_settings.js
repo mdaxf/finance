@@ -192,7 +192,7 @@ const RULE_ACTIONS = {
     hint: '✈️ A miles / points statement: the amount regex finds the balance (blank = a number followed by miles / points); the program is updated.'},
 };
 const LOG_RESULTS = {bill: 'bill', bill_paid: 'bill paid', schedule_post: 'schedule posted', schedule_new: 'schedule added',
-  loan_payment: 'loan payment', credit: 'credit', reward_balance: 'points'};
+  loan_payment: 'loan payment', credit: 'credit', reward_balance: 'points', similar: 'likely duplicate'};
 function logRefLink(l) {
   const go = {bill: '#/bills', schedule: '#/scheduled', credit: '#/credits', reward: '#/credits/rewards'}[l.ref_kind];
   if (l.ref_kind === 'loan' && l.ref_id) return `<a href="javascript:openLoan(${l.ref_id})">🤝 #${l.ref_id}</a>`;

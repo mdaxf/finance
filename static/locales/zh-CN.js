@@ -1183,6 +1183,7 @@ i18nAdd("zh-CN", "简体中文", {
 "issued {date}": "{date} 发放",
 "keywords:": "关键词：",
 "left": "剩余",
+"likely duplicate": "疑似重复",
 "link as {role}": "关联为{role}",
 "loan payment": "借贷还款",
 "matched from email": "已从邮件匹配",
