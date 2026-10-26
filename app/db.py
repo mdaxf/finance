@@ -323,6 +323,12 @@ class Database:
                 out.append("rewards")
             if "reminders" in tables and "reward_id" not in {r[1] for r in con.execute("PRAGMA table_info(reminders)")}:
                 out.append("reminders.reward_id")
+            if "email_rules" in tables and "target_id" not in {r[1] for r in con.execute("PRAGMA table_info(email_rules)")}:
+                out.append("email_rules.actions")
+            if "mailboxes" in tables and "watch_rules" not in {r[1] for r in con.execute("PRAGMA table_info(mailboxes)")}:
+                out.append("mailboxes.watch_rules")
+            if "ingest_log" in tables and "ref_kind" not in {r[1] for r in con.execute("PRAGMA table_info(ingest_log)")}:
+                out.append("ingest_log.ref")
             return out
         finally:
             con.close()
@@ -636,6 +642,22 @@ class Database:
             if "reward_id" not in {r[1] for r in con.execute("PRAGMA table_info(reminders)")}:
                 con.execute("ALTER TABLE reminders ADD COLUMN reward_id INTEGER")
             con.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_rem_reward ON reminders(reward_id) WHERE kind='reward'")
+            # email rule actions (additive): a parsing rule can create a bill, post / create a schedule, record a loan
+            # payment, create a credit or update a miles & points balance. date_regex = due / scheduled / payment / expiry
+            # date, payee = fixed payee / title, account_id = account to use, target_id = the schedule / loan / program.
+            rcols = {r[1] for r in con.execute("PRAGMA table_info(email_rules)")}
+            for col, ddl in (("date_regex", "TEXT DEFAULT ''"), ("payee", "TEXT DEFAULT ''"), ("account_id", "INTEGER"),
+                             ("target_id", "INTEGER")):
+                if col not in rcols:
+                    con.execute(f"ALTER TABLE email_rules ADD COLUMN {col} {ddl}")
+            # mailbox: also take emails a rule above targets (or that look like a bill) outside its sender/subject filter
+            if "watch_rules" not in {r[1] for r in con.execute("PRAGMA table_info(mailboxes)")}:
+                con.execute("ALTER TABLE mailboxes ADD COLUMN watch_rules INTEGER DEFAULT 0")
+            # ingest log: what the email became when it is not a transaction (bill / schedule / loan / credit / reward)
+            lcols = {r[1] for r in con.execute("PRAGMA table_info(ingest_log)")}
+            for col, ddl in (("ref_kind", "TEXT"), ("ref_id", "INTEGER")):
+                if col not in lcols:
+                    con.execute(f"ALTER TABLE ingest_log ADD COLUMN {col} {ddl}")
             # cursor pagination / account history (additive indexes)
             con.execute("CREATE INDEX IF NOT EXISTS ix_tx_date_id ON transactions(date, id)")
             con.execute("CREATE INDEX IF NOT EXISTS ix_tx_acct_date ON transactions(account_id, date, id)")

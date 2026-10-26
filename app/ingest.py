@@ -444,8 +444,11 @@ def _ingest_bill(db: Database, ex: dict, sender: str, subject: str, body: str, m
     rule_kind = ex.get("kind") if ex.get("kind") in ("bill", "bill_paid") else None
     if not rule_kind and ex.get("kind") == "hold":
         return None
+    from .email_actions import KINDS as ACTION_KINDS
+    if ex.get("kind") in ACTION_KINDS:  # a rule chose another action (schedule / loan / credit / points)
+        return None
     try:
-        res = bills.handle_email(db, sender, subject, body, _email_date(msg), mid, rule_kind)
+        res = bills.handle_email(db, sender, subject, body, _email_date(msg), mid, rule_kind, rule_overrides(ex))
     except Exception as e:  # noqa: BLE001 - a bill-parsing problem must never lose the email
         log.warning("bill email handling failed: %s", e)
         return None
@@ -462,12 +465,14 @@ def _ingest_bill(db: Database, ex: dict, sender: str, subject: str, body: str, m
         due = f", due {b['due_date']}" if b.get("due_date") else ", no due date found"
         amt = f" {fmt_money(b['amount'], b['currency'])}" if b.get("amount") is not None else " (amount not found)"
         what = "bill task created" if res["action"] == "created" else "bill already scheduled"
-        _log(db, **logbase, result="bill", detail=f"{what}: {b['payee']}{amt}{due}", rule_name=ex.get("rule_name"))
+        _log(db, **logbase, result="bill", detail=f"{what}: {b['payee']}{amt}{due}", rule_name=ex.get("rule_name"),
+             ref_kind="bill", ref_id=b["id"])
         return {"created": res["action"] == "created", "result": "bill", "action": res["action"], "bill": b, "extracted": p}
     # payment confirmation
     if res["action"] == "matched":
         b = res["bill"]
-        _log(db, **logbase, result="bill_paid", detail=f"bill #{b['id']} {b['payee']} marked paid", rule_name=ex.get("rule_name"))
+        _log(db, **logbase, result="bill_paid", detail=f"bill #{b['id']} {b['payee']} marked paid", rule_name=ex.get("rule_name"),
+             ref_kind="bill", ref_id=b["id"])
         return {"created": False, "result": "bill_paid", "bill": b, "extracted": p}
     why = f"payment {res['action']} ({res.get('reason') or ''}) → Bills → Payments to review"
     if rule_kind:
@@ -476,6 +481,42 @@ def _ingest_bill(db: Database, ex: dict, sender: str, subject: str, body: str, m
                 "candidates": res["candidates"], "extracted": p}
     ex["bill_note"] = why
     return None
+
+
+def rule_overrides(ex: dict) -> dict:
+    """The parsing rule's fixed bill fields (kind bill / bill_paid): payee, date, account; the rule's own amount."""
+    if "rule_id" not in ex:
+        return {}
+    return {"payee": ex.get("payee"), "date_text": ex.get("date_text"), "account_id": ex.get("rule_account_id"),
+            "amount": ex.get("rule_amount"), "currency": ex.get("rule_currency")}
+
+
+def _ingest_action(db: Database, ex: dict, sender: str, subject: str, msg: dict, mid: str, logbase: dict,
+                   mailbox: dict | None) -> dict | None:
+    """Rule kinds schedule_post / schedule_new / loan_payment / credit / reward_balance (see app/email_actions.py).
+    None = continue the normal flow (with the reason noted when the rule's action could not be done)."""
+    from . import email_actions
+    if ex.get("kind") not in email_actions.KINDS:
+        return None
+    try:
+        res = email_actions.handle(db, ex, sender, subject, _email_date(msg), mid, mailbox)
+    except Exception as e:  # noqa: BLE001 - an action problem must never lose the email
+        log.warning("email rule action failed: %s", e)
+        res = {"action": "skipped", "stop": False, "detail": f"{ex.get('kind')}: {type(e).__name__}: {e}"}
+    if not res:
+        return None
+    if not res.get("stop"):
+        ex["action_note"] = res.get("detail")
+        return None
+    _log(db, **logbase, result=res["result"], detail=res["detail"][:500], rule_name=ex.get("rule_name"),
+         transaction_id=res.get("transaction_id"), ref_kind=res.get("ref_kind"), ref_id=res.get("ref_id"))
+    ex.pop("text", None)
+    out = {"created": res["action"] in ("created", "posted", "recorded", "updated"), "result": res["result"],
+           "action": res["action"], "detail": res["detail"], "ref_kind": res.get("ref_kind"), "ref_id": res.get("ref_id"),
+           "extracted": ex}
+    if res.get("transaction_id"):
+        out["transaction"] = ledger.get_tx(db, res["transaction_id"])
+    return out
 
 
 def _email_date(msg: dict) -> str | None:
@@ -559,8 +600,10 @@ def _ingest_balance(db: Database, ex: dict, msg: dict, mid: str, logbase: dict, 
 
 
 def ingest_email(db: Database, msg: dict, mailbox: dict | None = None, auto_post: bool | None = None,
-                 source: str = "email") -> dict:
-    """msg: {from, subject, body, received_at, message_id?}. Returns result dict."""
+                 source: str = "email", bills_only: bool = False) -> dict:
+    """msg: {from, subject, body, received_at, message_id?}. Returns result dict.
+    bills_only: the email came in outside the mailbox's filter only because it looks like a bill (watch_rules): it
+    becomes a bill / payment match or nothing - never a transaction."""
     sender, subject, body = msg.get("from") or "", msg.get("subject") or "", msg.get("body") or ""
     mid = _dedupe_id(msg)
     mbox_id = mailbox["id"] if mailbox else None
@@ -581,6 +624,17 @@ def ingest_email(db: Database, msg: dict, mailbox: dict | None = None, auto_post
     bill_res = _ingest_bill(db, ex, sender, subject, body, msg, mid, logbase)
     if bill_res is not None:
         return bill_res
+    if bills_only:
+        _log(db, **logbase, result="skipped", detail="outside the mailbox filter and not a bill")
+        return {"created": False, "result": "skipped", "reason": "not a bill", "message_id": mid}
+    act_res = _ingest_action(db, ex, sender, subject, msg, mid, logbase, mailbox)
+    if act_res is not None:
+        return act_res
+    from .email_actions import KINDS as ACTION_KINDS
+    if ex.get("kind") in ACTION_KINDS:  # the rule's action could not be done: a transaction to review instead
+        from .email_rules import detect_kind
+        ex["kind"] = "income" if detect_kind(ex.get("text") or "") == "income" else "expense"
+        auto_post = False
     if ex.get("kind") in ("bill", "bill_paid"):
         ex["kind"] = "payment" if ex["kind"] == "bill_paid" else "expense"
     text = ex["text"]
@@ -602,6 +656,8 @@ def ingest_email(db: Database, msg: dict, mailbox: dict | None = None, auto_post
         conf += 0.1; reasons.append(f"rule {ex['rule_name']}")
     if ex.get("bill_note"):
         reasons.append(ex["bill_note"])
+    if ex.get("action_note"):
+        reasons.append(ex["action_note"] + " → a transaction to review instead")
     accounts = db.all("SELECT * FROM accounts WHERE archived=0")
     account_id = None
     if ex.get("last4"):
@@ -770,6 +826,7 @@ def poll_mailbox(db: Database, mb: dict, secret: SecretBox, max_messages: int = 
         typ, data = conn.uid("SEARCH", None, "SINCE", since)
         uids = (data[0] or b"").split()[-max_messages:]
         allow, keywords = _split(mb.get("sender_allowlist")), _split(mb.get("subject_keywords"))
+        rules = db.all("SELECT * FROM email_rules WHERE enabled=1") if mb.get("watch_rules") else []
         for uid in uids:
             stats["checked"] += 1
             typ, hd = conn.uid("FETCH", uid, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID FROM SUBJECT DATE)])")
@@ -781,10 +838,14 @@ def poll_mailbox(db: Database, mb: dict, secret: SecretBox, max_messages: int = 
             if db.one("SELECT 1 x FROM email_seen WHERE message_id=?", (mid,)):
                 stats["duplicates"] += 1
                 continue
-            if allow and not any(a in sender.lower() for a in allow):
-                continue
-            if keywords and not any(k in subject.lower() for k in keywords):
-                continue
+            bills_only = False
+            if (allow and not any(a in sender.lower() for a in allow)) or \
+                    (keywords and not any(k in subject.lower() for k in keywords)):
+                # outside the filter: with watch_rules, still take what an action rule targets or what looks like a bill
+                why = extra_reason(rules, sender, subject) if mb.get("watch_rules") else None
+                if not why:
+                    continue
+                bills_only = why == "bill"
             stats["matched"] += 1
             typ, full = conn.uid("FETCH", uid, "(BODY.PEEK[])")
             if typ != "OK" or not full or not isinstance(full[0], tuple):
@@ -792,7 +853,7 @@ def poll_mailbox(db: Database, mb: dict, secret: SecretBox, max_messages: int = 
                 continue
             m = email.message_from_bytes(full[0][1])
             res = ingest_email(db, {"from": sender, "subject": subject, "body": message_body(m),
-                                    "received_at": h.get("Date"), "message_id": mid}, mailbox=mb)
+                                    "received_at": h.get("Date"), "message_id": mid}, mailbox=mb, bills_only=bills_only)
             if res.get("created"):
                 stats["created"] += 1
             else:
@@ -819,6 +880,18 @@ def poll_mailbox(db: Database, mb: dict, secret: SecretBox, max_messages: int = 
     with db.tx() as con:
         con.execute("UPDATE mailboxes SET last_checked_at=?, last_status=? WHERE id=?", (now_iso(), summary[:500], mb["id"]))
     return {"status": status, **stats}
+
+
+def extra_reason(rules: list[dict], sender: str, subject: str) -> str | None:
+    """Why an email outside a mailbox's sender / subject filter is still taken (mailbox option watch_rules):
+    'rule' = an enabled rule of an action kind (bill, schedule, loan, credit, points) matches its sender / subject;
+    'bill' = its subject reads like a bill or a payment confirmation (then only the bill flow runs); None = skip."""
+    from .bills import BILL_HINTS, PAID_HINTS, _low
+    from .email_rules import ACTION_KINDS, rule_matches
+    if any(r.get("kind") in ACTION_KINDS and rule_matches(r, sender, subject) for r in rules):
+        return "rule"
+    s = _low(subject)
+    return "bill" if any(h in s for h in BILL_HINTS + PAID_HINTS) else None
 
 
 def due_mailboxes(db: Database, now: datetime | None = None) -> list[dict]:

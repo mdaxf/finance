@@ -2044,7 +2044,7 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
     # ------------------------------------------------------------ email monitoring
     MB_FIELDS = ["name", "host", "port", "use_ssl", "username", "folder", "interval_minutes", "enabled",
                  "sender_allowlist", "subject_keywords", "after_action", "move_folder", "default_account_id",
-                 "auto_post", "lookback_days", "schedule_mode", "schedule_times", "schedule_weekdays"]
+                 "auto_post", "lookback_days", "schedule_mode", "schedule_times", "schedule_weekdays", "watch_rules"]
 
     def _mb_public(m: dict) -> dict:
         from . import mail_schedule as ms
@@ -2063,7 +2063,7 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
         for k in ("port", "interval_minutes", "lookback_days"):
             if k in d:
                 d[k] = int(d[k] or 0) or None
-        for k in ("use_ssl", "enabled", "auto_post"):
+        for k in ("use_ssl", "enabled", "auto_post", "watch_rules"):
             if k in d:
                 d[k] = 1 if d[k] in (True, 1, "1", "true", "on") else 0
         if "after_action" in d and d["after_action"] not in ("none", "mark_read", "move"):
@@ -2175,11 +2175,11 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
             ORDER BY l.id DESC LIMIT ?""", (min(limit, 2000),))
 
     RULE_FIELDS = ["name", "sender_pattern", "subject_pattern", "amount_regex", "merchant_regex", "last4_regex", "kind",
-                   "currency", "enabled", "priority", "note", "adjust_reason"]
+                   "currency", "enabled", "priority", "note", "adjust_reason", "date_regex", "payee", "account_id", "target_id"]
 
     def _rule_data(body: dict) -> dict:
         d = {k: body[k] for k in RULE_FIELDS if k in body}
-        for k in ("sender_pattern", "subject_pattern", "amount_regex", "merchant_regex", "last4_regex"):
+        for k in ("sender_pattern", "subject_pattern", "amount_regex", "merchant_regex", "last4_regex", "date_regex"):
             if d.get(k):
                 try:
                     re.compile(d[k])
@@ -2194,6 +2194,22 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
                 raise HTTPException(400, f"adjust_reason must be one of {ledger.REASON_CODES} (blank = account default)")
         if "enabled" in d:
             d["enabled"] = 1 if d["enabled"] in (True, 1, "1", "true", "on") else 0
+        if "payee" in d:
+            d["payee"] = (d["payee"] or "").strip()[:120]
+        from .email_rules import TARGET_TABLES
+        for k, table in (("account_id", "accounts"), ("target_id", None)):
+            if k not in d:
+                continue
+            if d[k] in (None, "", 0, "0"):
+                d[k] = None
+                continue
+            try:
+                d[k] = int(d[k])
+            except (TypeError, ValueError):
+                raise HTTPException(400, f"{k} must be a number")
+            table = table or TARGET_TABLES.get(d.get("kind") or body.get("kind") or "")
+            if table and not db.one(f"SELECT 1 x FROM {table} WHERE id=?", (d[k],)):
+                raise HTTPException(400, f"{k}: #{d[k]} not found in {table}")
         return d
 
     @app.get("/api/email-rules")
@@ -2236,10 +2252,40 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
         if body.get("rule"):
             rules = [dict(_rule_data(body["rule"]), id=0, enabled=1, name=body["rule"].get("name") or "test")]
         res = parse_email(body.get("from") or "", body.get("subject") or "", body.get("body") or "", rules)
-        res.pop("text", None)
         if res.get("kind") == "balance":  # preview of the adjustment it would record (no writes)
             res["balance_preview"] = ingest.balance_plan(db, res, ingest._email_date({"received_at": body.get("received_at")}))
+        res["action_preview"] = _action_preview(body, res)
+        res.pop("text", None)
         return res
+
+    def _action_preview(body: dict, ex: dict) -> dict | None:
+        """What ingesting this email would make besides a plain transaction: a bill / bill payment match, a schedule
+        post, a new schedule, a loan payment, a credit or a points update. Nothing is written."""
+        from . import email_actions
+        when = ingest._email_date({"received_at": body.get("received_at")})
+        if ex.get("kind") in email_actions.KINDS:
+            return email_actions.handle(db, dict(ex), body.get("from") or "", body.get("subject") or "", when, "test",
+                                        dry_run=True)
+        if ex.get("kind") == "hold" or ex.get("kind") == "balance":
+            return None
+        rule_kind = ex["kind"] if ex.get("kind") in ("bill", "bill_paid") else None
+        r = bills.handle_email(db, body.get("from") or "", body.get("subject") or "", body.get("body") or "", when, "test",
+                               rule_kind, ingest.rule_overrides(ex), dry_run=True)
+        if not r:
+            return None
+        p, b = r["parsed"], r.get("bill")
+        if r["type"] == "bill":
+            what = {"create": "creates a bill", "existing": f"links to open bill #{b['id'] if b else ''}",
+                    "skipped": "no bill: " + (r.get("reason") or "")}[r["action"]]
+            detail = f"{what} · {p.get('payee') or '?'} {p.get('amount') if p.get('amount') is not None else '(no amount)'}" \
+                     f"{' ' + (p.get('currency') or '') if p.get('amount') is not None else ''}, due {p.get('due_date') or '—'}"
+        else:
+            detail = {"matched": f"marks bill #{b['id'] if b else ''} {b['payee'] if b else ''} paid",
+                      "ambiguous": "several open bills match → Bills → Payments to review",
+                      "unmatched": "no open bill matches" + (" → Bills → Payments to review" if rule_kind else "")}[r["action"]] \
+                + f" · {p.get('payee') or '?'} {p.get('amount')}, paid {p.get('paid_date')}"
+        return {"result": "bill" if r["type"] == "bill" else "bill_paid", "action": r["action"], "detail": detail,
+                "ref_kind": "bill" if b else None, "ref_id": b["id"] if b else None, "parsed": p, "dry_run": True}
 
     # ------------------------------------------------------------ demo
     @app.post("/api/demo/load")
