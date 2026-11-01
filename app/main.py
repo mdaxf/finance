@@ -112,6 +112,14 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
     def index():
         return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
 
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon():
+        return FileResponse(STATIC / "icons" / "favicon.ico", headers={"Cache-Control": "public, max-age=86400"})
+
+    @app.get("/manifest.json", include_in_schema=False)
+    def manifest():
+        return FileResponse(STATIC / "manifest.json", media_type="application/manifest+json", headers={"Cache-Control": "no-cache"})
+
     @app.get("/login", include_in_schema=False)
     def login_page():
         if not db.get_setting("password_hash"):
