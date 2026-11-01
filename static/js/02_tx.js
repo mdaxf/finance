@@ -81,7 +81,7 @@ function txTable(rows, {compact = false, select = false, tbodyId = ''} = {}) {
 }
 function txRowsHtml(rows, {compact = false, select = false} = {}) {
   return `${rows.map(t => `<tr data-tx="${t.id}" style="cursor:pointer">${select ? `<td class="hide-m" onclick="event.stopPropagation()"><input type="checkbox" class="sel" value="${t.id}"></td>` : ''}
-   <td class="nowrap small hide-m">${esc(t.date.slice(0, compact ? 10 : 16))}</td><td class="hide-m"><span class="pill ${t.kind}">${kindLabel[t.kind] || t.kind}</span>${t.status === 'review' ? ' <span class="pill review">review</span>' : ''}</td>
+   <td class="nowrap small hide-m">${esc(t.date.slice(0, compact ? 10 : 16))}</td><td class="hide-m"><span class="pill ${t.kind}">${kindLabel[t.kind] || t.kind}</span>${t.kind === 'transfer' && t.as_expense ? ' <span class="pill expense" title="Counted as an expense in reports">as expense</span>' : ''}${t.status === 'review' ? ' <span class="pill review">review</span>' : ''}</td>
    <td>${t.reconciled_id ? '<span class="rec-badge" title="Reconciled (on or before a reconciliation checkpoint)">✔🔒</span> ' : ''}${txDesc(t)}<div class="small muted" style="display:none" data-m>${esc(t.date.slice(0, 16))}</div></td>${compact ? '' : `<td class="small muted hide-m">${esc(srcLabel[t.source] || t.source)}</td>`}<td class="tx-amt">${txAmount(t)}</td></tr>`).join('')}`;
 }
 function bindTxRows(root, after) { $$('tr[data-tx]', root).forEach(tr => tr.onclick = () => openTx(+tr.dataset.tx, after)); }
@@ -184,6 +184,8 @@ async function openTx(id, after, preset = {}, opts = {}) {
       <label class="f${U('to_account_id')}"><span>To</span><select name="to_account_id">${acctOptions(t.to_account_id)}</select></label>
       <label class="f full" id="toAmtWrap"><span id="toAmtLbl">Amount received</span><input name="to_amount" type="number" step="0.01" inputmode="decimal" value="${t.to_amount ?? ''}" placeholder="optional, converted with your rates if empty"></label>
     </div>
+    <div class="full ax-box" data-show="transfer"><label class="chk"><input type="checkbox" name="as_expense" ${t.as_expense ? 'checked' : ''}> <b>Count as expense</b> <span class="small muted">— e.g. loan / mortgage principal: still a transfer (balances unchanged), but reports, budgets and spending count it under this category</span></label>
+      <label class="f ax-cat" ${t.as_expense ? '' : 'hidden'}><span>Expense category</span><select name="ax_category_id">${catOptions('expense', t.kind === 'transfer' ? t.category_id : null)}</select></label></div>
     <label class="f${U('category_id')}" data-show="expense income refund dividend"><span>Category</span><select name="category_id"></select></label>
     <label class="f" data-show="adjustment"><span>Reason for difference</span><select name="adj_reason">${reasonOptions(t.adj_reason || (isNew ? defaultReason(acctById(t.account_id)) : 'correction'), {opening: true})}</select><span class="small muted" id="reasonWhy"></span></label>
     <details class="full taxtip-box" data-show="expense income refund" ${t.tax_amount != null || t.tip_amount != null ? 'open' : ''}><summary class="small">Tax &amp; tip <span class="muted">(optional, part of the amount)</span></summary>
@@ -300,6 +302,7 @@ async function openTx(id, after, preset = {}, opts = {}) {
   form.to_account_id.addEventListener('change', syncTransfer);
   form.currency.addEventListener('change', curHint);
   form.reimbursable.addEventListener('change', () => { $('.reimb-fields', bg).hidden = !form.reimbursable.checked; });
+  form.as_expense.addEventListener('change', () => { $('.ax-cat', bg).hidden = !form.as_expense.checked; });
   if (!document.getElementById('dlPayer')) document.body.insertAdjacentHTML('beforeend', '<datalist id="dlPayer"></datalist>');
   api('/api/reimbursements?status=all').then(d => { $('#dlPayer').innerHTML = d.payers.map(p => `<option value="${esc(p)}">`).join(''); }).catch(() => {});
   sync();
@@ -342,6 +345,8 @@ async function openTx(id, after, preset = {}, opts = {}) {
     for (const k of ['to_amount', 'shares', 'price', 'fee']) if (o[k] === '') o[k] = null;
     if (o.amount === '') o.amount = null;
     if (!['expense', 'income', 'refund', 'dividend'].includes(kind)) o.category_id = null;
+    o.as_expense = kind === 'transfer' && form.as_expense.checked;
+    if (o.as_expense) o.category_id = fd.get('ax_category_id') || null;
     o.adj_reason = kind === 'adjustment' ? fd.get('adj_reason') : null;
     if (!o.adj_reason) delete o.adj_reason;
     if (['expense', 'income', 'refund'].includes(kind)) for (const k of ['tax_amount', 'tip_amount', 'tax_rate']) { const v = fd.get(k); o[k] = v === '' || v == null ? null : +v; }

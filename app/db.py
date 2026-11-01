@@ -329,6 +329,8 @@ class Database:
                 out.append("mailboxes.watch_rules")
             if "ingest_log" in tables and "ref_kind" not in {r[1] for r in con.execute("PRAGMA table_info(ingest_log)")}:
                 out.append("ingest_log.ref")
+            if "as_expense" not in {r[1] for r in con.execute("PRAGMA table_info(transactions)")}:
+                out.append("transactions.as_expense")
             return out
         finally:
             con.close()
@@ -658,6 +660,19 @@ class Database:
             for col, ddl in (("ref_kind", "TEXT"), ("ref_id", "INTEGER")):
                 if col not in lcols:
                     con.execute(f"ALTER TABLE ingest_log ADD COLUMN {col} {ddl}")
+            # a transfer can count as an expense 计入支出 (e.g. loan principal): as_expense=1 + an expense category_id.
+            # Balances are unchanged (it is still a transfer); reports / budgets count it under that category.
+            if "as_expense" not in {r[1] for r in con.execute("PRAGMA table_info(transactions)")}:
+                con.execute("ALTER TABLE transactions ADD COLUMN as_expense INTEGER DEFAULT 0")
+                # loan principal paid so far (borrowed loans) counts as an expense, under the loan's interest category
+                con.execute("""UPDATE transactions SET as_expense=1, category_id=COALESCE(category_id,
+                    (SELECT l.interest_category_id FROM loan_links k JOIN loans l ON l.id=k.loan_id WHERE k.transaction_id=transactions.id))
+                    WHERE kind='transfer' AND id IN (SELECT k.transaction_id FROM loan_links k JOIN loans l ON l.id=k.loan_id
+                    WHERE k.role='principal' AND l.direction='borrowed')""")
+            lncols = {r[1] for r in con.execute("PRAGMA table_info(loans)")}
+            for col, ddl in (("principal_as_expense", "INTEGER DEFAULT 1"), ("principal_category_id", "INTEGER")):
+                if col not in lncols:
+                    con.execute(f"ALTER TABLE loans ADD COLUMN {col} {ddl}")
             # cursor pagination / account history (additive indexes)
             con.execute("CREATE INDEX IF NOT EXISTS ix_tx_date_id ON transactions(date, id)")
             con.execute("CREATE INDEX IF NOT EXISTS ix_tx_acct_date ON transactions(account_id, date, id)")

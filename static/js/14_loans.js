@@ -171,6 +171,9 @@ async function loanForm(opts = {}) {
     <label class="f" data-mat><span>${t('Due by')} <small class="muted">${t('(optional for repay any time)')}</small></span><input name="maturity_date" type="date" value="${esc(x.maturity_date || '')}"></label>
     <label class="f" data-for="borrowed"><span>${t('Interest category')}</span><select name="interest_category_id" data-kind="expense">${catOptions('expense', x.direction === 'borrowed' ? x.interest_category_id : null)}</select></label>
     <label class="f" data-for="lent"><span>${t('Interest category')}</span><select name="interest_category_id_in" data-kind="income">${catOptions('income', x.direction === 'lent' ? x.interest_category_id : null)}</select></label>
+    <div class="full" data-for="borrowed"><label class="chk"><input type="checkbox" name="principal_as_expense" ${x.principal_as_expense === 0 ? '' : 'checked'}> ${t('Count the principal paid as an expense in reports')}</label>
+      <div class="small muted">${t('The principal stays a transfer (the loan balance goes down), but reports, budgets and spending count it under this category. Changing it also updates the principal already paid.')}</div>
+      <label class="f ln-pcat"><span>${t('Principal category')} <small class="muted">${t('(blank = the interest category)')}</small></span><select name="principal_category_id">${catOptions('expense', x.principal_category_id)}</select></label></div>
     <details class="full" data-for="borrowed" ${x.escrow ? 'open' : ''}><summary class="small">${t('Escrow (optional): property tax / insurance paid with each payment')}</summary><div class="form">
       <label class="f"><span>${t('Escrow per payment')}</span><input name="escrow" type="number" step="0.01" min="0" inputmode="decimal" value="${x.escrow || ''}"></label>
       <label class="f"><span>${t('Escrow category')}</span><select name="escrow_category_id">${catOptions('expense', x.escrow_category_id)}</select></label></div></details>
@@ -208,6 +211,7 @@ async function loanForm(opts = {}) {
       interest_category_id: (dir === 'lent' ? f.interest_category_id_in.value : f.interest_category_id.value) || null,
       escrow: dir === 'borrowed' ? f.escrow.value || null : null, escrow_category_id: dir === 'borrowed' ? f.escrow_category_id.value || null : null,
       note: f.note.value, remind: f.remind.checked};
+    if (dir === 'borrowed') { body.principal_as_expense = f.principal_as_expense.checked; body.principal_category_id = f.principal_category_id.value || null; }
     if (!edit) {
       body.direction = dir;
       if (f.existing.checked) {
