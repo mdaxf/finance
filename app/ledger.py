@@ -378,7 +378,7 @@ TX_FIELDS = ["ledger_id", "kind", "date", "amount", "currency", "account_id", "t
              "orig_amount", "orig_currency", "category_id", "merchant_id", "member_id", "project_id", "tags", "note",
              "source", "attachment", "status", "confidence", "raw_text", "external_id", "ticker", "shares", "price",
              "fee", "is_demo", "pr_class", "reimbursable", "reimb_payer", "reimb_expected", "reimb_note", "plan_line_id",
-             "tax_amount", "tip_amount", "tax_rate"]
+             "tax_amount", "tip_amount", "tax_rate", "as_expense"]
 TAXTIP_KINDS = ("expense", "income", "refund")
 
 
@@ -536,6 +536,7 @@ def normalize_tx(con, data: dict, rates: dict[str, float], existing: dict | None
             tx["to_amount"] = None
     else:
         tx["to_account_id"] = None if kind != "transfer" else tx.get("to_account_id")
+    tx["as_expense"] = 1 if kind == "transfer" and tx.get("as_expense") and str(tx.get("as_expense")).lower() not in ("0", "false", "no") else 0
     if kind == "adjustment":
         # the category of an adjustment is its reason (差额原因): a sub-category of 'Balance adjustment'
         reason = data.get("adj_reason") or data.get("reason")
@@ -549,6 +550,11 @@ def normalize_tx(con, data: dict, rates: dict[str, float], existing: dict | None
         else:  # unclassified: the parent category (treated as Correction/other, or Opening balance for opening rows)
             r = con.execute("SELECT id FROM categories WHERE kind='adjustment' AND parent_id IS NULL ORDER BY id LIMIT 1").fetchone()
             tx["category_id"] = r[0] if r else None
+    elif kind == "transfer" and tx.get("as_expense"):
+        # a transfer counted as an expense 计入支出 (e.g. loan principal) keeps an expense category for reports
+        if tx.get("category_id") and not con.execute("SELECT 1 FROM categories WHERE id=? AND kind='expense'",
+                                                     (tx["category_id"],)).fetchone():
+            raise ValidationError("A transfer counted as an expense needs an expense category")
     elif kind in ("transfer", "reimbursement") + tuple(INVEST_KINDS):
         tx["category_id"] = tx.get("category_id") if kind == "dividend" else None
     if kind != "adjustment" and tx.get("category_id") and con.execute(
@@ -746,12 +752,13 @@ def _summary(db: Database, w: str, params: list) -> dict:
     """Count and income/expense sums (base currency) of everything matching a filter (for list headers)."""
     base = db.get_setting("base_currency", "USD"); rates = fx_rates(db)
     inc = exp = 0.0; n = 0
-    for r in db.all(f"SELECT t.kind, t.currency, SUM({REPORT_AMOUNT_SQL}) s, COUNT(*) n FROM ({TX_SELECT}{w}) t GROUP BY t.kind, t.currency", params):
+    for r in db.all(f"SELECT t.kind, t.currency, COALESCE(t.as_expense,0) ax, SUM({REPORT_AMOUNT_SQL}) s, COUNT(*) n "
+                    f"FROM ({TX_SELECT}{w}) t GROUP BY t.kind, t.currency, ax", params):
         n += r["n"]
         v = convert(r["s"] or 0, r["currency"], base, rates)
         if r["kind"] == "income":
             inc += v
-        elif r["kind"] == "expense":
+        elif r["kind"] == "expense" or (r["kind"] == "transfer" and r["ax"]):
             exp += v
         elif r["kind"] == "refund":
             exp -= v
@@ -930,10 +937,12 @@ def _projected(t: dict, sched: dict | None) -> dict:
 INVEST_TYPES_SQL = "(" + ",".join(f"'{k}'" for k, v in ACCOUNT_TYPES.items() if v[3]) + ")"
 
 
-def _flow_rows(db: Database, start: str, end: str, ledger_id: int | None, project_id: int | None = None):
+def _flow_rows(db: Database, start: str, end: str, ledger_id: int | None, project_id: int | None = None,
+               transfers: bool = True):
     """Rows that count as income/expense. Besides expense/income/refund this includes balance adjustments whose reason
     is Unrecorded spending (→ expense), Unrecorded income (→ income) or Fees on a non-investment account (→ expense).
-    Their amount is signed so that a balance *decrease* is a positive expense."""
+    Their amount is signed so that a balance *decrease* is a positive expense.
+    transfers: also transfers marked 'count as expense' 计入支出 (as_expense=1, e.g. loan principal) as expenses."""
     cond = "t.status='posted' AND t.date >= ? AND t.date < ?"
     params: list[Any] = [start, end]
     if ledger_id:
@@ -952,6 +961,11 @@ def _flow_rows(db: Database, start: str, end: str, ledger_id: int | None, projec
         income = reason == "unrecorded_income"
         rows.append({**r, "kind": "income" if income else "expense", "amount": r["amount"] if income else -r["amount"],
                      "parent_id": None, "adjustment": reason})
+    if transfers:
+        for r in db.all(f"""SELECT t.amount, t.currency, t.date, t.category_id, c.parent_id, t.id, t.plan_line_id,
+            t.member_id, t.merchant_id, t.project_id, t.account_id, t.tags FROM transactions t LEFT JOIN categories c ON c.id=t.category_id
+            WHERE {cond} AND t.kind='transfer' AND COALESCE(t.as_expense,0)=1""", params):
+            rows.append({**r, "kind": "expense", "as_expense": True})
     return rows
 
 
@@ -985,10 +999,11 @@ def investment_income(db: Database, start: str, end: str, ledger_id: int | None 
     return out
 
 
-def totals(db: Database, start: str, end: str, ledger_id: int | None = None, project_id: int | None = None) -> dict:
+def totals(db: Database, start: str, end: str, ledger_id: int | None = None, project_id: int | None = None,
+           transfers: bool = True) -> dict:
     base = db.get_setting("base_currency", "USD"); rates = fx_rates(db)
     inc = exp = 0.0
-    for r in _flow_rows(db, start, end, ledger_id, project_id):
+    for r in _flow_rows(db, start, end, ledger_id, project_id, transfers):
         v = convert(r["amount"], r["currency"], base, rates)
         if r["kind"] == "income":
             inc += v
@@ -1013,13 +1028,13 @@ def _group_keys(r: dict, group_by: str) -> list:
 
 
 def breakdown_items(db: Database, start: str, end: str, group_by: str, kind: str, key: str | None,
-                    ledger_id: int | None = None, project_id: int | None = None) -> dict:
+                    ledger_id: int | None = None, project_id: int | None = None, transfers: bool = True) -> dict:
     """Drill-down of one breakdown row: the transactions behind it (same rules as breakdown, so they add up).
     key = the row's key as text ('' = the (none) / Uncategorized row)."""
     base = db.get_setting("base_currency", "USD"); rates = fx_rates(db)
     want = "" if key in (None, "None", "null") else str(key)
     amounts: dict[int, float] = {}
-    for r in _flow_rows(db, start, end, ledger_id, project_id):
+    for r in _flow_rows(db, start, end, ledger_id, project_id, transfers):
         if kind == "expense" and r["kind"] not in ("expense", "refund") or kind == "income" and r["kind"] != "income":
             continue
         if want not in ("" if k is None else str(k) for k in _group_keys(r, group_by)):
@@ -1032,12 +1047,14 @@ def breakdown_items(db: Database, start: str, end: str, group_by: str, kind: str
 
 
 def breakdown(db: Database, start: str, end: str, group_by: str = "category", kind: str = "expense",
-              ledger_id: int | None = None, project_id: int | None = None, parent_id: int | None = None) -> list[dict]:
-    """parent_id: only rows in that top-level category (drill-down; use with group_by='subcategory')."""
+              ledger_id: int | None = None, project_id: int | None = None, parent_id: int | None = None,
+              transfers: bool = True) -> list[dict]:
+    """parent_id: only rows in that top-level category (drill-down; use with group_by='subcategory').
+    transfers: include transfers counted as expenses 计入支出 (loan principal …)."""
     base = db.get_setting("base_currency", "USD"); rates = fx_rates(db)
     sums: dict[Any, float] = defaultdict(float)
     counts: dict[Any, int] = defaultdict(int)
-    for r in _flow_rows(db, start, end, ledger_id, project_id):
+    for r in _flow_rows(db, start, end, ledger_id, project_id, transfers):
         if parent_id and (r.get("parent_id") or r["category_id"]) != parent_id:
             continue
         if kind == "expense" and r["kind"] not in ("expense", "refund"):

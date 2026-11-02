@@ -191,9 +191,11 @@ def project(loan, bal: float, start_due: date | None, limit: int = MAX_ROWS) -> 
 
 # ------------------------------------------------------------------ reading
 SELECT = """SELECT l.*, a.name account_name, a.type account_type, a.archived account_archived, pa.name pay_account_name,
-  pa.currency pay_account_currency, ic.name interest_category_name, ec.name escrow_category_name
+  pa.currency pay_account_currency, ic.name interest_category_name, ec.name escrow_category_name,
+  pc.name principal_category_name
   FROM loans l LEFT JOIN accounts a ON a.id=l.account_id LEFT JOIN accounts pa ON pa.id=l.pay_account_id
-  LEFT JOIN categories ic ON ic.id=l.interest_category_id LEFT JOIN categories ec ON ec.id=l.escrow_category_id"""
+  LEFT JOIN categories ic ON ic.id=l.interest_category_id LEFT JOIN categories ec ON ec.id=l.escrow_category_id
+  LEFT JOIN categories pc ON pc.id=l.principal_category_id"""
 
 LINK_SELECT = """SELECT k.*, t.kind tx_kind, t.date tx_date, t.amount tx_amount, t.currency tx_currency, t.status tx_status,
   t.note tx_note, t.account_id tx_account_id, a.name tx_account_name, t.to_account_id tx_to_account_id,
@@ -357,7 +359,8 @@ def list_loans(db: Database, f: dict | None = None) -> dict:
 
 # ------------------------------------------------------------------ create / edit
 EDITABLE = ("name", "counterparty", "kind", "pay_account_id", "rate", "freq", "first_due", "term", "payment", "escrow",
-            "interest_category_id", "escrow_category_id", "maturity_date", "note", "remind", "start_date")
+            "interest_category_id", "escrow_category_id", "maturity_date", "note", "remind", "start_date",
+            "principal_as_expense", "principal_category_id")
 
 
 def _clean(con, body: dict, ex: dict | None = None) -> dict:
@@ -392,12 +395,13 @@ def _clean(con, body: dict, ex: dict | None = None) -> dict:
             raise ValidationError("term is the number of payments")
         if d["term"] is not None and not 1 <= d["term"] <= 1200:
             raise ValidationError("term must be between 1 and 1200 payments")
-    for k in ("pay_account_id", "interest_category_id", "escrow_category_id"):
+    for k in ("pay_account_id", "interest_category_id", "escrow_category_id", "principal_category_id"):
         if k in body:
             d[k] = int(body[k]) if body.get(k) not in (None, "", 0, "0") else None
-    if "remind" in body:
-        v = body.get("remind")
-        d["remind"] = 1 if (v is True or str(v).lower() in ("1", "true", "yes", "on")) else 0
+    for k in ("remind", "principal_as_expense"):
+        if k in body:
+            v = body.get(k)
+            d[k] = 1 if (v is True or str(v).lower() in ("1", "true", "yes", "on")) else 0
     m = {**(ex or {}), **d}
     if m.get("freq") in PERIODS or m.get("freq") == "once":
         if m.get("freq") == "once" and not (m.get("maturity_date") or m.get("first_due")):
@@ -414,7 +418,7 @@ def _clean(con, body: dict, ex: dict | None = None) -> dict:
             raise ValidationError("Payment account not found")
         if ex and a["id"] == ex.get("account_id"):
             raise ValidationError("Choose the bank account the payments go through, not the loan account")
-    for k, kind in (("interest_category_id", None), ("escrow_category_id", "expense")):
+    for k, kind in (("interest_category_id", None), ("escrow_category_id", "expense"), ("principal_category_id", "expense")):
         if d.get(k):
             c = con.execute("SELECT kind FROM categories WHERE id=?", (d[k],)).fetchone()
             want = kind or ("income" if (m.get("direction") or body.get("direction")) == "lent" else "expense")
@@ -536,6 +540,13 @@ def update(db: Database, lid: int, body: dict) -> dict:
         loan = dict(con.execute("SELECT * FROM loans WHERE id=?", (lid,)).fetchone())
         if loan["schedule_id"]:
             _sync_schedule(con, loan)
+        if loan["direction"] == "borrowed" and any(
+                k in d and d[k] != ex.get(k) for k in ("principal_as_expense", "principal_category_id")):
+            # the principal already paid follows the setting too (it only changes reports, never balances)
+            on = 1 if _col(loan, "principal_as_expense", 1) else 0
+            con.execute("""UPDATE transactions SET as_expense=?, category_id=?, updated_at=? WHERE kind='transfer' AND id IN
+                (SELECT transaction_id FROM loan_links WHERE loan_id=? AND role='principal')""",
+                        (on, (loan["principal_category_id"] or loan["interest_category_id"]) if on else None, now_iso(), lid))
         _sync(con, lid, _today(db))
     return get(db, lid)
 
@@ -580,6 +591,15 @@ def _link_row(con, loan, eid: int, tid: int, role: str, amount: float) -> None:
                 (loan["id"], eid, tid, role, _r2(amount), now_iso()))
 
 
+def _col(row, k: str, default=None):
+    """row[k] for a sqlite Row or dict, `default` when the column is missing or NULL."""
+    try:
+        v = row[k]
+    except (KeyError, IndexError):
+        return default
+    return default if v is None else v
+
+
 def _common(loan) -> dict:
     return {"ledger_id": loan["ledger_id"] or 1, "source": "loan", "is_demo": loan["is_demo"] or 0}
 
@@ -618,8 +638,11 @@ def _part_data(con, loan, role: str, amount: float, aid: int, body: dict) -> dic
         if lent:
             return {"kind": "transfer", "account_id": loan["account_id"], "to_account_id": aid, "amount": amount,
                     "currency": loan["currency"], "note": note}
-        return {"kind": "transfer", "account_id": aid, "to_account_id": loan["account_id"], "amount": amount, "currency": loan["currency"],
-                "to_amount": amount if cross else None, "note": note}
+        out = {"kind": "transfer", "account_id": aid, "to_account_id": loan["account_id"], "amount": amount, "currency": loan["currency"],
+               "to_amount": amount if cross else None, "note": note}
+        if _col(loan, "principal_as_expense", 1):  # counted as an expense 计入支出 in reports (still a transfer)
+            out.update(as_expense=1, category_id=_col(loan, "principal_category_id") or loan["interest_category_id"])
+        return out
     cat = (body.get(f"{role}_category_id") or (loan["escrow_category_id"] if role == "escrow" else loan["interest_category_id"]))
     if role == "fee" and not body.get("fee_category_id"):
         cat = loan["interest_category_id"] if lent else (_cat(con, "expense", "Bank Fees") or loan["interest_category_id"])

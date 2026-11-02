@@ -1,5 +1,6 @@
 """Loan Center 借贷中心: money lent / borrowed, repayments split into principal (transfer) + interest (expense /
-income), expected schedule, loan schedules, reminders, and "principal never counts as spending". FAKE data only."""
+income), expected schedule, loan schedules, reminders. The principal is a transfer; by default it is also counted as an expense in
+reports (principal_as_expense, see test_transfer_as_expense.py). FAKE data only."""
 from datetime import date, timedelta
 
 T = date.today()
@@ -57,7 +58,7 @@ def test_borrowed_loan_disbursement_is_a_transfer_and_payment_splits(client):
     y = r["loan"]
     assert y["outstanding"] == 99900.45 and y["next_due"] == "2030-03-01" and y["interest_total"] == 500
     assert bal(client, bank) == round(110000 - 599.55, 2)
-    assert totals(client, "2030-02") == (0, 500.0)  # only the interest is spending
+    assert totals(client, "2030-02") == (0, 599.55)  # interest + principal (counted as an expense by default)
     tx = ok(client.get(f"/api/transactions/{r['plan'][1]['transaction_id']}"))
     assert tx["category_name"] == "Interest Paid" and tx["loans"][0]["role"] == "interest"
 
@@ -129,7 +130,8 @@ def test_convert_existing_expense_in_place(client, db):
     same = ok(client.get(f"/api/transactions/{t['id']}"))
     assert same["kind"] == "transfer" and same["to_account_id"] == x["account_id"] and same["amount"] == 99.55
     assert same["merchant_name"] == "Test Bank" and "mortgage autopay" in same["note"]
-    assert totals(client, "2030-02") == (0, 500.0)
+    assert totals(client, "2030-02") == (0, 599.55)  # still the whole payment in reports (principal counted as expense)
+    assert same["as_expense"] == 1
     assert r["loan"]["outstanding"] == 99900.45
     # already linked: can't convert twice
     assert client.post(f"/api/transactions/{t['id']}/to-loan-payment", json={"loan_id": x["id"]}).status_code == 400
@@ -206,7 +208,7 @@ def test_escrow_is_spending_with_its_category(client, db):
     assert x["escrow_category_id"]  # defaults to Property Tax (an expense category)
     r = ok(client.post(f"/api/loans/{x['id']}/payments", json={"date": "2030-02-01"}))
     assert {p["role"]: p["amount"] for p in r["plan"]} == {"principal": 99.55, "interest": 500.0, "escrow": 300.0}
-    assert totals(client, "2030-02") == (0, 800.0)
+    assert totals(client, "2030-02") == (0, 899.55)
     assert r["loan"]["projection"][0]["payment"] == round(599.55 + 300, 2)
 
 

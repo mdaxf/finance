@@ -1854,26 +1854,27 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
 
     @app.get("/api/reports")
     def reports(start: str | None = None, end: str | None = None, group_by: str = "category", kind: str = "expense",
-                ledger_id: int | None = None, project_id: int | None = None):
+                ledger_id: int | None = None, project_id: int | None = None, transfers: bool = True):
+        """transfers: count transfers marked 'count as expense' 计入支出 (loan principal …) as expenses (default on)."""
         today = date.today()
         start = start or f"{today.year}-01-01"
         end_excl = (end + " 99") if end else f"{today.year + 1}-01-01"
         if group_by not in ("category", "subcategory", "member", "merchant", "project", "account", "tag", "month"):
             raise HTTPException(400, "bad group_by")
-        return {"rows": ledger.breakdown(db, start, end_excl, group_by, kind, ledger_id, project_id),
-                "totals": ledger.totals(db, start, end_excl, ledger_id, project_id), "start": start, "end": end,
-                "project_id": project_id}
+        return {"rows": ledger.breakdown(db, start, end_excl, group_by, kind, ledger_id, project_id, transfers=transfers),
+                "totals": ledger.totals(db, start, end_excl, ledger_id, project_id, transfers), "start": start, "end": end,
+                "project_id": project_id, "transfers": transfers}
 
     @app.get("/api/reports/items")
     def report_items(group_by: str, key: str = "", start: str | None = None, end: str | None = None, kind: str = "expense",
-                     ledger_id: int | None = None, project_id: int | None = None):
+                     ledger_id: int | None = None, project_id: int | None = None, transfers: bool = True):
         """Drill-down: the transactions behind one row of /api/reports (same period, kind, ledger and project)."""
         today = date.today()
         start = start or f"{today.year}-01-01"
         end_excl = (end + " 99") if end else f"{today.year + 1}-01-01"
         if group_by not in ("category", "subcategory", "member", "merchant", "project", "account", "tag", "month"):
             raise HTTPException(400, "bad group_by")
-        return ledger.breakdown_items(db, start, end_excl, group_by, kind, key, ledger_id, project_id)
+        return ledger.breakdown_items(db, start, end_excl, group_by, kind, key, ledger_id, project_id, transfers)
 
     @app.get("/api/reports/tax-tips")
     def tax_tips(start: str | None = None, end: str | None = None, group_by: str = "month", kind: str = "expense",

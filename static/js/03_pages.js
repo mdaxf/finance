@@ -397,15 +397,17 @@ VIEWS.reports = async (v) => {
   const y = new Date().getFullYear();
   S.rep = S.rep || {start: `${y}-01-01`, end: today(), group_by: 'category', kind: 'expense'};
   const r = S.rep;
+  if (r.transfers == null) r.transfers = '1';
   v.innerHTML = `<div class="card"><form id="rf" class="row"><input type="date" name="start" value="${r.start}" style="width:auto"> → <input type="date" name="end" value="${r.end}" style="width:auto">
    <select name="kind" style="width:auto"><option value="expense" ${r.kind === 'expense' ? 'selected' : ''}>Expense</option><option value="income" ${r.kind === 'income' ? 'selected' : ''}>Income</option></select>
    <select name="group_by" style="width:auto">${[['category', 'Category'], ['subcategory', 'Sub-category'], ['month', 'Month'], ['account', 'Account'], ['member', 'Member'], ['merchant', 'Merchant'], ['project', 'Project'], ['tag', 'Tag']].map(([k, l]) => `<option value="${k}" ${r.group_by === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
    <select name="project_id" style="width:auto">${listOptions(S.meta.projects, r.project_id, 'All projects')}</select>
+   <label class="chk small" title="Transfers marked 'Count as expense' (e.g. loan / mortgage principal) are counted as expenses under their category. Off = the accounting view: principal is a transfer, not spending."><input type="checkbox" name="transfers" value="1" ${r.transfers !== '0' ? 'checked' : ''}> Include transfers counted as expense</label>
    <button class="btn pri">Run</button><span class="sp"></span><span id="rt" class="muted"></span></form></div>
    <div class="grid g2" style="margin-top:16px"><div class="card"><h3>Chart</h3><div class="chart-box" style="height:320px"><canvas id="rc"></canvas></div></div><div class="card"><h3>Table</h3><div id="rtab"></div></div></div>
    <div class="card" style="margin-top:16px"><h3>Tax &amp; tips 税/小费<span class="sp"></span><span id="ttTot" class="small muted"></span></h3><div class="small muted">Only transactions where tax or tip was recorded. Tip % = tips ÷ subtotal (amount − tax − tip).</div><div class="grid g2"><div class="chart-box" style="height:260px"><canvas id="rtt"></canvas></div><div id="ttTab"></div></div></div>
    <div class="card" style="margin-top:16px"><h3>Net worth history (24 months)</h3><div class="chart-box"><canvas id="rnw"></canvas></div></div>`;
-  $('#rf').onsubmit = e => { e.preventDefault(); Object.assign(r, Object.fromEntries(new FormData(e.target))); route(); };
+  $('#rf').onsubmit = e => { e.preventDefault(); const fd = new FormData(e.target); Object.assign(r, Object.fromEntries(fd), {transfers: fd.has('transfers') ? '1' : '0'}); route(); };
   const d = await api(`/api/reports?${new URLSearchParams(Object.entries({...r, ...(S.ledger ? {ledger_id: S.ledger} : {})}).filter(([, x]) => x !== '' && x != null))}`);
   $('#rt').innerHTML = `Income ${money(d.totals.income)} · Expense ${money(d.totals.expense)} · Net ${money(d.totals.net)} · <span title="Investment gain/loss + interest + dividends − investment fees (balance adjustments classified by reason). Not part of income/expense.">Investment income <b class="${d.totals.investment_income >= 0 ? 'pos' : 'neg'}">${money(d.totals.investment_income)}</b></span>`;
   const rows = r.group_by === 'month' ? [...d.rows].sort((a, b) => String(a.key).localeCompare(String(b.key))) : d.rows;
@@ -426,7 +428,7 @@ VIEWS.reports = async (v) => {
 };
 
 async function reportDrill(r, row) {
-  const q = {group_by: r.group_by, key: row.key ?? '', start: r.start, end: r.end, kind: r.kind, project_id: r.project_id, ledger_id: S.ledger};
+  const q = {group_by: r.group_by, key: row.key ?? '', start: r.start, end: r.end, kind: r.kind, project_id: r.project_id, ledger_id: S.ledger, transfers: r.transfers};
   const d = await guard(() => api('/api/reports/items?' + new URLSearchParams(Object.entries(q).filter(([, x]) => x !== '' && x != null))));
   const bg = modal(`${esc(row.name)} <span class="small muted">${esc(r.start)} → ${esc(r.end)}</span>`,
     `<div class="small muted" style="margin-bottom:8px">${d.count} transaction${d.count === 1 ? '' : 's'} · ${r.kind === 'income' ? 'Income' : 'Expense'} ${money(d.total, d.currency)}</div>
