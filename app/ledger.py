@@ -651,7 +651,8 @@ def get_tx(db: Database, tid: int) -> dict | None:
     from .reimburse import annotate  # local import: reimburse imports this module
     from .reserves import annotate as reserve_badges
     from .loans import annotate as loan_badges
-    return loan_badges(db, reserve_badges(db, annotate(db, [decorate(r)], links=True)))[0]
+    from .credits import annotate as credit_badges
+    return credit_badges(db, loan_badges(db, reserve_badges(db, annotate(db, [decorate(r)], links=True))))[0]
 
 
 def _tx_where(f: dict) -> tuple[str, list]:
@@ -732,7 +733,8 @@ def query_tx(db: Database, f: dict) -> tuple[list[dict], int]:
     from .reimburse import annotate
     from .reserves import annotate as reserve_badges
     from .loans import annotate as loan_badges
-    return loan_badges(db, reserve_badges(db, annotate(db, [decorate(r) for r in rows], links=bool(f.get("with_links"))))), total
+    from .credits import annotate as credit_badges
+    return credit_badges(db, loan_badges(db, reserve_badges(db, annotate(db, [decorate(r) for r in rows], links=bool(f.get("with_links")))))), total
 
 
 def encode_cursor(t: dict) -> str:
@@ -785,6 +787,8 @@ def page_tx(db: Database, f: dict) -> dict:
     reserve_badges(db, rows)  # reserve 押金/预授权 badges
     from .loans import annotate as loan_badges
     loan_badges(db, rows)  # loan 借贷 badges
+    from .credits import annotate as credit_badges
+    credit_badges(db, rows)  # credit 抵用金 badges
     out = {"items": rows, "has_more": has_more, "next_cursor": encode_cursor(rows[-1]) if has_more and rows else None}
     if not cur or str(f.get("with_total", "")).lower() in ("1", "true"):
         s = _summary(db, w, params)

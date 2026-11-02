@@ -1,11 +1,23 @@
 /* ---------- Credits 抵用金 (#/credits) and Bills 账单待付 (#/bills) ----------
-   Credits: refund / cancellation / bonus credits with an expiry date (a note only: never a transaction). Use it all or
-   part of it; a reminder shows N months (setting, default 6) before it expires, and expired credits are flagged.
+   Credits: refund / cancellation / bonus credits with an expiry date. In the ledger (per credit, on by default) the credit
+   is money in its account (else the system Credits account): adding it records income / a refund, each use records (or
+   links) the spending, closing it takes off what was forfeited. Off: a note only. Use it all or part of it; a reminder shows N months (setting, default 6) before it expires, and expired credits are flagged.
    Bills: payment tasks created from bill / payment-request emails (or by hand), reminded N days (default 3) before the
    due date; payment-confirmation emails mark them paid, unmatched / ambiguous ones wait under "Payments to review". */
 S.cr = S.cr || {states: ['active', 'partial', 'expired']};
 const CR_STATE = {active: 'Active', partial: 'Partly used', expired: 'Expired', used: 'Used', void: 'Closed'};
 const CR_SOURCE = {refund: 'Refund', cancel: 'Cancellation', bonus: 'Bonus'};
+const CR_MODE = {post: 'Record a new income / refund', link: 'Link a transaction already recorded', balance: 'Already in the account balance', none: 'No transaction'};
+const CR_ROLE = {issue: 'added', use: 'used', writeoff: 'forfeited', part: 'paid in part'};
+const txCreditPill = x => (x.credits || []).map(k => `<span class="pill" title="${t('Linked to a credit')}">🎟 ${esc(k.title || t('Credit'))} · ${t(CR_ROLE[k.role] || k.role)}</span> `).join('');
+/* <option>s: recent transactions on an account, to link to a credit (the selected one is kept even when older) */
+async function crTxOptions(aid, sel, {blank, kind, anyAcct} = {}) {
+  if (!aid && !anyAcct) return `<option value="">${t('Choose the account first')}</option>`;
+  const d = await api('/api/transactions?' + new URLSearchParams([...(aid ? [['account_id', aid]] : []), ...(kind ? [['kind', kind]] : []), ['limit', '80']]));
+  const items = d.items || [];
+  if (sel && !items.some(x => x.id == sel)) { try { items.unshift(await api('/api/transactions/' + sel)); } catch (e) { /* deleted */ } }
+  return `<option value="">${blank || t('— Choose a transaction —')}</option>` + items.map(x => `<option value="${x.id}" data-amt="${Math.abs(x.amount)}" ${x.id == sel ? 'selected' : ''}>${esc(x.date.slice(0, 10))} · ${esc(t(kindLabel[x.kind] || x.kind))} · ${esc(money(Math.abs(x.amount), x.currency))} · ${esc(x.merchant_name || x.category_label || x.note || '#' + x.id)}</option>`).join('');
+}
 const crBadge = c => `<span class="pill${c.state === 'expired' ? ' cx-bad' : c.expiring_soon ? ' warn' : ''}">${t(CR_STATE[c.state] || c.state)}</span>`;
 function crWhen(c) {
   if (c.closed || c.days_left == null) return '';
@@ -27,7 +39,7 @@ VIEWS.credits = async (v, rest) => {
   const sc = d.state_counts || {};
   const set = S.meta.settings;
   v.innerHTML = `${crTabs('credits')}<div class="card"><div class="page-h"><h2>🎟 ${t('Credits')}</h2><div class="row"><button class="btn pri" id="crNew">＋ ${t('New credit')}</button></div></div>
-    <p class="small muted">${t('Credits from refunds, cancellations and bonuses that expire (airline and travel credits, store credit, promo bonuses). A credit is a note only: it never changes a balance.')}</p>
+    <p class="small muted">${t('Credits from refunds, cancellations and bonuses that expire (airline and travel credits, store credit, promo bonuses). In the ledger a credit is money in its account: adding it records income or a refund, and each use records the spending.')}</p>
     <div class="rb-cards">
       <div class="ic"><div class="lbl">${t('Available')}</div><div class="val">${d.available.length ? d.available.map(x => money(x.amount, x.currency)).join('<br>') : money(0)}</div><div class="small muted">${t('Not expired, not used')}</div></div>
       <div class="ic"><div class="lbl">${t('Expiring soon')}</div><div class="val">${d.expiring_count}</div><div class="small muted">${esc(t('Within {n} months', {n: d.lead_months}))}</div></div>
@@ -63,27 +75,89 @@ function creditForm(c, after) {
     <label class="f"><span>${t('Issued')}</span><input name="issued_date" type="date" value="${esc(c ? c.issued_date : today())}"></label>
     <label class="f"><span>${t('Expires')}</span><input name="expiry_date" type="date" required value="${esc(c ? c.expiry_date || '' : '')}"></label>
     <label class="f"><span>${t('Reference')}</span><input name="reference" value="${esc(c ? c.reference || '' : '')}"></label>
-    <label class="f full"><span>${t('Note')}</span><input name="note" value="${esc(c ? c.note || '' : '')}"></label></form>`,
+    <label class="f full"><span>${t('Note')}</span><input name="note" value="${esc(c ? c.note || '' : '')}"></label>
+    <label class="chk full"><input type="checkbox" name="ledger" ${!c || c.ledger ? 'checked' : ''}> <b>${t('Record in the ledger')}</b> <span class="small muted">— ${t('the credit is money in its account (or the Credits account): adding it records income or a refund, using it records the spending')}</span></label>
+    <label class="f cr-l"><span>${t('When added')}</span><select name="issue_mode">${Object.entries(CR_MODE).map(([k, l]) => `<option value="${k}" ${(c ? c.issue_mode || 'post' : 'post') === k ? 'selected' : ''}>${t(l)}</option>`).join('')}</select></label>
+    <label class="f cr-l cr-cat"><span>${t('Category')}</span><select name="category_id"></select></label>
+    <label class="f full cr-l cr-link"><span>${t('Transaction it came from')}</span><select name="issue_tx_id"></select></label></form>`,
     {buttons: `<button class="btn" data-x2>${t('Cancel')}</button><button class="btn pri" data-ok>${t('Save')}</button>`});
   const f = $('#crF', bg); $('[data-x2]', bg).onclick = bg.close;
+  let cat = c ? c.category_id : null, link = c && c.issue_mode === 'link' ? c.issue_tx_id : null, lastAcct = null;
+  const sync = async () => {
+    const on = f.ledger.checked, mode = f.issue_mode.value;
+    $$('.cr-l', f).forEach(x => x.hidden = !on);
+    $('.cr-cat', f).hidden = !on || mode !== 'post';
+    $('.cr-link', f).hidden = !on || mode !== 'link';
+    if (f.category_id.value) cat = f.category_id.value;
+    f.category_id.innerHTML = catOptions(f.source.value === 'bonus' ? 'income' : 'expense', cat);
+    if (on && mode === 'link' && lastAcct !== f.account_id.value) {
+      lastAcct = f.account_id.value;
+      f.issue_tx_id.innerHTML = await crTxOptions(lastAcct, link);
+    }
+  };
+  ['ledger', 'issue_mode', 'source', 'account_id'].forEach(k => f[k].addEventListener('change', sync));
+  f.issue_tx_id.onchange = () => { link = f.issue_tx_id.value; };
+  sync();
   $('[data-ok]', bg).onclick = async () => {
     const body = Object.fromEntries(new FormData(f));
+    body.ledger = f.ledger.checked;
     if (body.remaining === '') delete body.remaining;
     await guard(() => api(c ? `/api/credits/${c.id}` : '/api/credits', {method: c ? 'PUT' : 'POST', body}));
     bg.close(); toast(t('Saved')); after();
   };
 }
-function creditUse(c, after) {
+async function creditUse(c, after) {
+  c = await api('/api/credits/' + c.id);
+  const hold = esc(c.hold_account_name || '');
   const bg = modal(t('Use credit'), `<form class="form" id="cuF" autocomplete="off">
     <p class="small muted full">${esc(t('{title}: {amt} left, expires {date}', {title: c.label, amt: money(c.remaining, c.currency), date: c.expiry_date}))}</p>
     ${c.expired ? `<p class="small neg full">⚠️ ${t('This credit has expired. Record a use only if the merchant still honoured it.')}</p>` : ''}
     <label class="f"><span>${t('Amount used')} (${esc(c.currency)})</span><input name="amount" type="number" step="0.01" min="0" value="${c.remaining}"></label>
     <label class="f"><span>${t('Date')}</span><input name="date" type="date" value="${today()}"></label>
-    <label class="f full"><span>${t('Note')}</span><input name="note" placeholder="${t('What it was used for')}"></label></form>`,
+    <label class="f full"><span>${t('Note')}</span><input name="note" placeholder="${t('What it was used for')}"></label>
+    ${c.ledger ? `<label class="f full"><span>${t('In the ledger')}</span><select name="mode">
+        <option value="split">${esc(t('Pay part of a recorded purchase'))}</option>
+        <option value="rec">${esc(t('Record the spending from {acct}', {acct: c.hold_account_name || ''}))}</option>
+        <option value="link">${esc(t('Link a transaction already on {acct}', {acct: c.hold_account_name || ''}))}</option></select></label>
+      <p class="small muted full cu-split">${esc(t('The purchase is reduced by the amount used, and the credit\'s part is recorded as an expense from {acct} with the same category and merchant.', {acct: c.hold_account_name || ''}))}</p>
+      <label class="f cu-split"><span>${t('Account')}</span><select name="split_acct">${acctOptions(null, {blank: t('All accounts')})}</select></label>
+      <label class="f full cu-split"><span>${t('Purchase')}</span><select name="split_tx_id"></select></label>
+      <label class="f cu-rec"><span>${t('Category')}</span><select name="category_id">${catOptions('expense', c.source !== 'bonus' ? c.category_id : null)}</select></label>
+      <label class="f cu-rec"><span>${t('Merchant')}</span><input name="merchant" value="${esc(c.title || '')}"></label>
+      <label class="f full cu-link"><span>${t('Transaction')}</span><select name="transaction_id"></select></label>` : `<p class="small muted full">${t('This credit is a note only: no transaction is recorded.')}</p>`}</form>`,
     {buttons: `<button class="btn" data-x2>${t('Cancel')}</button><button class="btn pri" data-ok>${t('Save')}</button>`});
   const f = $('#cuF', bg); $('[data-x2]', bg).onclick = bg.close;
+  let loaded = false, splitAcct = null;
+  const sync = async () => {
+    if (!c.ledger) return;
+    const m = f.mode.value;
+    $$('.cu-rec', f).forEach(x => x.hidden = m !== 'rec');
+    $('.cu-link', f).hidden = m !== 'link';
+    $$('.cu-split', f).forEach(x => x.hidden = m !== 'split');
+    if (m === 'link' && !loaded) { loaded = true; f.transaction_id.innerHTML = await crTxOptions(c.hold_account_id, null); }
+    if (m === 'split' && splitAcct !== f.split_acct.value) {
+      splitAcct = f.split_acct.value;
+      f.split_tx_id.innerHTML = await crTxOptions(splitAcct, null, {kind: 'expense', anyAcct: true, blank: t('— Choose the purchase —')});
+    }
+  };
+  const fillAmt = sel => { const o = sel.selectedOptions[0]; if (o && o.dataset.amt) f.amount.value = Math.min(+o.dataset.amt, c.remaining); };
+  if (c.ledger) {
+    f.mode.onchange = sync;
+    f.split_acct.onchange = sync;
+    f.transaction_id.onchange = () => fillAmt(f.transaction_id);
+    f.split_tx_id.onchange = () => fillAmt(f.split_tx_id);
+    sync();
+  }
   $('[data-ok]', bg).onclick = async () => {
-    const r = await guard(() => api(`/api/credits/${c.id}/use`, {method: 'POST', body: {amount: f.amount.value, date: f.date.value, note: f.note.value, force: !!c.expired}}));
+    const body = {amount: f.amount.value, date: f.date.value, note: f.note.value, force: !!c.expired};
+    if (c.ledger && f.mode.value === 'split') {
+      if (!f.split_tx_id.value) return toast(t('Choose the transaction it paid for'), true);
+      body.split_tx_id = f.split_tx_id.value;
+    } else if (c.ledger && f.mode.value === 'link') {
+      if (!f.transaction_id.value) return toast(t('Choose the transaction it paid for'), true);
+      body.transaction_id = f.transaction_id.value;
+    } else if (c.ledger) Object.assign(body, {category_id: f.category_id.value, merchant: f.merchant.value});
+    const r = await guard(() => api(`/api/credits/${c.id}/use`, {method: 'POST', body}));
     bg.close(); toast(r.state === 'used' ? t('Credit used up') : t('Partly used: {amt} left', {amt: money(r.remaining, r.currency)})); after();
   };
 }
@@ -95,12 +169,15 @@ async function openCredit(id, after) {
       <div class="ic"><div class="lbl">${t('Remaining')}</div><div class="val ${c.expired ? 'neg' : ''}">${money(c.remaining, c.currency)}</div></div></div>
     <div class="small">${esc(t('issued {date}', {date: c.issued_date}))} · ${esc(t('Expires'))} <b>${esc(c.expiry_date || '—')}</b>${crWhen(c)}</div>
     ${c.note ? `<div class="small muted">${esc(c.note)}</div>` : ''}
-    <h3>${t('Uses')}</h3>${c.uses.length ? `<table class="t">${c.uses.map(u => `<tr><td>${esc(u.date)}</td><td>${esc(u.note || '')}</td><td class="right">${money(u.amount, c.currency)}</td><td class="right"><button class="btn sm" data-undo="${u.id}" title="${t('Undo')}">↶</button></td></tr>`).join('')}</table>` : `<div class="small muted">${t('Not used yet')}</div>`}`,
+    ${c.ledger ? `<div class="small">📒 ${t('In the ledger')} · ${esc(c.hold_account_name || '')} · ${c.issue_tx ? `<a href="#" data-txo="${c.issue_tx.id}">${esc(t('added as {kind} #{id}', {kind: t(kindLabel[c.issue_tx.kind] || c.issue_tx.kind), id: c.issue_tx.id}))} · ${money(c.issue_tx.amount, c.issue_tx.currency)}</a>` : esc(t(CR_MODE[c.issue_mode] || ''))}${c.writeoff_tx ? ` · <a href="#" data-txo="${c.writeoff_tx.id}">${esc(t('forfeited #{id}', {id: c.writeoff_tx.id}))} · ${money(c.writeoff_tx.amount, c.writeoff_tx.currency)}</a>` : ''}</div>`
+      : `<div class="small muted">${t('Note only (not in the ledger)')}</div>`}
+    <h3>${t('Uses')}</h3>${c.uses.length ? `<table class="t">${c.uses.map(u => `<tr><td>${esc(u.date)}</td><td>${esc(u.note || '')}${u.transaction_id ? `<div class="small"><a href="#" data-txo="${u.transaction_id}">${esc(t(u.auto_tx ? 'recorded #{id}' : 'linked #{id}', {id: u.transaction_id}))}${u.tx_category_name ? ' · ' + esc(u.tx_category_name) : ''}</a>${u.split_tx_id && u.split_tx_id !== u.transaction_id ? ` · <a href="#" data-txo="${u.split_tx_id}">${esc(t('part of #{id}', {id: u.split_tx_id}))}</a>` : ''}</div>` : ''}</td><td class="right">${money(u.amount, c.currency)}</td><td class="right"><button class="btn sm" data-undo="${u.id}" title="${t('Undo')}">↶</button></td></tr>`).join('')}</table>` : `<div class="small muted">${t('Not used yet')}</div>`}`,
     {wide: true, buttons: `<button class="btn danger" data-del>${t('Delete')}</button><span class="sp"></span>${c.state === 'void' || c.state === 'used' && c.status !== 'open' ? `<button class="btn" data-reo>${t('Reopen')}</button>` : `<button class="btn" data-void>${t('Close (forfeit the rest)')}</button>`}<button class="btn" data-ed>✎ ${t('Edit')}</button>${c.closed ? '' : `<button class="btn pri" data-use>${t('Use…')}</button>`}`});
   const done = () => { bg.close(); after(); };
   $$('[data-undo]', bg).forEach(b => b.onclick = async () => { await guard(() => api(`/api/credits/${c.id}/uses/${b.dataset.undo}`, {method: 'DELETE'})); done(); });
+  $$('[data-txo]', bg).forEach(a => a.onclick = e => { e.preventDefault(); bg.close(); openTx(+a.dataset.txo, after); });
   $('[data-del]', bg).onclick = async () => { if (!await confirmBox(t('Delete this credit?'))) return; await guard(() => api('/api/credits/' + c.id, {method: 'DELETE'})); done(); };
-  const vd = $('[data-void]', bg); if (vd) vd.onclick = async () => { if (!await confirmBox(t('Close this credit? What is left will no longer be tracked or reminded.'))) return; await guard(() => api(`/api/credits/${c.id}/void`, {method: 'POST'})); done(); };
+  const vd = $('[data-void]', bg); if (vd) vd.onclick = async () => { if (!await confirmBox(t(c.ledger && c.remaining > 0 ? (c.issue_mode === 'post' ? 'Close this credit? What is left is forfeited: it comes off the income / refund recorded for it.' : 'Close this credit? What is left is forfeited: a write-off expense is recorded for it.') : 'Close this credit? What is left will no longer be tracked or reminded.'))) return; await guard(() => api(`/api/credits/${c.id}/void`, {method: 'POST'})); done(); };
   const ro = $('[data-reo]', bg); if (ro) ro.onclick = async () => { await guard(() => api(`/api/credits/${c.id}/reopen`, {method: 'POST'})); done(); };
   $('[data-ed]', bg).onclick = () => { bg.close(); creditForm(c, after); };
   const us = $('[data-use]', bg); if (us) us.onclick = () => { bg.close(); creditUse(c, after); };
