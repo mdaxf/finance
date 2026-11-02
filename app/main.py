@@ -725,7 +725,8 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
     @app.post("/api/credits")
     def credit_create(body: dict = Body(...)):
         """{account_id? (blank = issuer only: then title is required), source: refund|cancel|bonus, amount, remaining?, currency?, issued_date?, expiry_date, title?,
-        reference?, note?}. A note only: never a transaction."""
+        reference?, note?, ledger? (default on: recorded as transactions), category_id?, issue_mode? post|link|balance|none,
+        issue_tx_id? (link), writeoff_category_id?}."""
         return credits.create(db, dict(body or {}))
 
     @app.get("/api/credits/{cid}")
@@ -742,7 +743,8 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
 
     @app.post("/api/credits/{cid}/use")
     def credit_use(cid: int, body: dict = Body(default={})):
-        """Mark used: {amount?} (blank = all that is left), date?, note?, transaction_id?, force? (an expired credit)."""
+        """Mark used: {amount?} (blank = all that is left), date?, note?, transaction_id? (link a recorded one), category_id?,
+        merchant? (the spending recorded when the credit is in the ledger), force? (an expired credit)."""
         return credits.use(db, cid, body or {})
 
     @app.delete("/api/credits/{cid}/uses/{uid}")
@@ -752,7 +754,7 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
     @app.post("/api/credits/{cid}/void")
     def credit_void(cid: int, body: dict = Body(default={})):
         """Close what is left (forfeited / not wanted)."""
-        return credits.close(db, cid, (body or {}).get("note"))
+        return credits.close(db, cid, (body or {}).get("note"), (body or {}).get("writeoff_category_id"))
 
     @app.post("/api/credits/{cid}/reopen")
     def credit_reopen(cid: int):

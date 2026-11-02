@@ -331,6 +331,8 @@ class Database:
                 out.append("ingest_log.ref")
             if "as_expense" not in {r[1] for r in con.execute("PRAGMA table_info(transactions)")}:
                 out.append("transactions.as_expense")
+            if "credits" in tables and "ledger" not in {r[1] for r in con.execute("PRAGMA table_info(credits)")}:
+                out.append("credits.ledger")
             return out
         finally:
             con.close()
@@ -579,6 +581,7 @@ class Database:
                 cols = [r[1] for r in con.execute("PRAGMA table_info(credits)")]
                 sql = con.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='credits'").fetchone()[0]
                 con.execute("DROP TRIGGER IF EXISTS trg_acct_delete_credits")
+                con.execute("DROP TRIGGER IF EXISTS trg_tx_delete_credit")  # names credits: recreated below
                 con.execute(sql.replace("account_id INTEGER NOT NULL", "account_id INTEGER", 1).replace("CREATE TABLE credits", "CREATE TABLE credits_new", 1))
                 con.execute(f"INSERT INTO credits_new({','.join(cols)}) SELECT {','.join(cols)} FROM credits")
                 con.execute("DROP TABLE credits")
@@ -597,8 +600,6 @@ class Database:
             con.execute("""CREATE TRIGGER IF NOT EXISTS trg_acct_delete_credits AFTER DELETE ON accounts BEGIN
                 DELETE FROM credit_uses WHERE credit_id IN (SELECT id FROM credits WHERE account_id=OLD.id);
                 DELETE FROM credits WHERE account_id=OLD.id; END""")
-            con.execute("""CREATE TRIGGER IF NOT EXISTS trg_tx_delete_credit_use AFTER DELETE ON transactions BEGIN
-                UPDATE credit_uses SET transaction_id=NULL WHERE transaction_id=OLD.id; END""")
             # Email-driven bills 账单待付 (additive): bill / payment-request emails -> payment tasks (reminder kind 'bill');
             # bill_payments = payment confirmations, matched to a bill or kept for review (unmatched / ambiguous).
             con.execute("""CREATE TABLE IF NOT EXISTS bills (
@@ -673,6 +674,31 @@ class Database:
             for col, ddl in (("principal_as_expense", "INTEGER DEFAULT 1"), ("principal_category_id", "INTEGER")):
                 if col not in lncols:
                     con.execute(f"ALTER TABLE loans ADD COLUMN {col} {ddl}")
+            # credits 抵用金 in the ledger (per credit, `ledger`=1): the credit's value sits in a holding account (its own
+            # account, else the system 'Credits 抵用金' account). issue_mode: post (an income / refund transaction is created:
+            # issue_tx_id, issue_auto=1) | link (issue_tx_id = a transaction already recorded) | balance (already in the
+            # account's balance) | none. Each use links (or creates: credit_uses.auto_tx=1) a spending transaction; closing
+            # with money left creates a write-off (writeoff_tx_id). Existing credits start as notes (ledger=0).
+            crcols = {r[1] for r in con.execute("PRAGMA table_info(credits)")}
+            for col, ddl in (("ledger", "INTEGER DEFAULT 0"), ("category_id", "INTEGER"), ("issue_mode", "TEXT DEFAULT 'post'"),
+                             ("issue_tx_id", "INTEGER"), ("issue_auto", "INTEGER DEFAULT 0"), ("writeoff_tx_id", "INTEGER"),
+                             ("writeoff_category_id", "INTEGER")):
+                if col not in crcols:
+                    con.execute(f"ALTER TABLE credits ADD COLUMN {col} {ddl}")
+            if "auto_tx" not in {r[1] for r in con.execute("PRAGMA table_info(credit_uses)")}:
+                con.execute("ALTER TABLE credit_uses ADD COLUMN auto_tx INTEGER DEFAULT 0")
+            # deleting a transaction: a use whose spending was created for it is undone (money back on the credit); a
+            # linked one is unlinked; an issue / write-off transaction is detached (issue_mode -> none)
+            con.execute("DROP TRIGGER IF EXISTS trg_tx_delete_credit_use")  # replaced by trg_tx_delete_credit
+            con.execute("""CREATE TRIGGER IF NOT EXISTS trg_tx_delete_credit AFTER DELETE ON transactions BEGIN
+                UPDATE credits SET remaining=MIN(amount, remaining + (SELECT COALESCE(SUM(u.amount),0) FROM credit_uses u
+                    WHERE u.credit_id=credits.id AND u.transaction_id=OLD.id AND u.auto_tx=1)),
+                    status=CASE WHEN status='void' THEN 'void' ELSE 'open' END
+                    WHERE id IN (SELECT credit_id FROM credit_uses WHERE transaction_id=OLD.id AND auto_tx=1);
+                DELETE FROM credit_uses WHERE transaction_id=OLD.id AND auto_tx=1;
+                UPDATE credit_uses SET transaction_id=NULL WHERE transaction_id=OLD.id;
+                UPDATE credits SET issue_tx_id=NULL, issue_auto=0, issue_mode='none' WHERE issue_tx_id=OLD.id;
+                UPDATE credits SET writeoff_tx_id=NULL WHERE writeoff_tx_id=OLD.id; END""")
             # cursor pagination / account history (additive indexes)
             con.execute("CREATE INDEX IF NOT EXISTS ix_tx_date_id ON transactions(date, id)")
             con.execute("CREATE INDEX IF NOT EXISTS ix_tx_acct_date ON transactions(account_id, date, id)")

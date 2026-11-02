@@ -60,7 +60,8 @@ function txDesc(t) {
   const rb = t.kind === 'expense' && t.reimbursable ? txReimbPill(t) : t.kind === 'reimbursement' ? txReimbPill(t) : '';
   const rs = t.reserves && t.reserves.length && typeof txReservePill === 'function' ? txReservePill(t) : '';
   const ln = t.loans && t.loans.length && typeof txLoanPill === 'function' ? txLoanPill(t) : '';
-  return `<div>${demo}${rb}${rs}${ln}<b>${main}</b> ${tags}</div><div class="small muted">${t.kind !== 'transfer' ? esc(t.account_name || '— no account —') + ' · ' : ''}${bits.join(' · ')}${t.note ? ' · ' + esc(t.note.slice(0, 80)) : ''}${t.attachment ? ' · 📎' : ''}</div>`;
+  const cr = t.credits && t.credits.length && typeof txCreditPill === 'function' ? txCreditPill(t) : '';
+  return `<div>${demo}${rb}${rs}${ln}${cr}<b>${main}</b> ${tags}</div><div class="small muted">${t.kind !== 'transfer' ? esc(t.account_name || '— no account —') + ' · ' : ''}${bits.join(' · ')}${t.note ? ' · ' + esc(t.note.slice(0, 80)) : ''}${t.attachment ? ' · 📎' : ''}</div>`;
 }
 /* reimbursement status badge in transaction lists: expense open / partial / closed, reimbursement unallocated money */
 function txReimbPill(x) {

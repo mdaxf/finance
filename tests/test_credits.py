@@ -114,10 +114,11 @@ def test_validation(client):
     assert credit(client, account_id=a, source="Cancellation", amount=10, expiry_date=days(client, 30))["source"] == "cancel"
 
 
-def test_credits_never_touch_balances(client):
+def test_note_only_credits_never_touch_balances(client):
+    """ledger off: a note only (the ledger mode is covered in test_credit_ledger.py)"""
     a = acct(client)
     before = {x["id"]: x["balance"] for x in client.get("/api/accounts").json()["accounts"]}
-    c = credit(client, account_id=a, source="bonus", amount=50, expiry_date=days(client, 60))
+    c = credit(client, account_id=a, source="bonus", amount=50, expiry_date=days(client, 60), ledger=False)
     client.post(f"/api/credits/{c['id']}/use", json={"amount": 20})
     after = {x["id"]: x["balance"] for x in client.get("/api/accounts").json()["accounts"]}
     assert before == after and client.get("/api/transactions").json()["items"] == []
@@ -213,7 +214,7 @@ def test_digest_and_email_report_list_credits(client, db):
 def test_account_delete_removes_its_credits(client):
     a = acct(client)
     credit(client, account_id=a, source="bonus", amount=10, expiry_date=days(client, 30))
-    assert client.delete(f"/api/accounts/{a}").status_code == 200
+    assert client.delete(f"/api/accounts/{a}?force=true").status_code == 200  # force: its credit's transaction goes too
     assert client.get("/api/credits?state=all").json()["items"] == [] and credit_rems(client) == []
 
 
