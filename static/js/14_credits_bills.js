@@ -8,12 +8,12 @@ S.cr = S.cr || {states: ['active', 'partial', 'expired']};
 const CR_STATE = {active: 'Active', partial: 'Partly used', expired: 'Expired', used: 'Used', void: 'Closed'};
 const CR_SOURCE = {refund: 'Refund', cancel: 'Cancellation', bonus: 'Bonus'};
 const CR_MODE = {post: 'Record a new income / refund', link: 'Link a transaction already recorded', balance: 'Already in the account balance', none: 'No transaction'};
-const CR_ROLE = {issue: 'added', use: 'used', writeoff: 'forfeited'};
+const CR_ROLE = {issue: 'added', use: 'used', writeoff: 'forfeited', part: 'paid in part'};
 const txCreditPill = x => (x.credits || []).map(k => `<span class="pill" title="${t('Linked to a credit')}">🎟 ${esc(k.title || t('Credit'))} · ${t(CR_ROLE[k.role] || k.role)}</span> `).join('');
 /* <option>s: recent transactions on an account, to link to a credit (the selected one is kept even when older) */
-async function crTxOptions(aid, sel, {blank} = {}) {
-  if (!aid) return `<option value="">${t('Choose the account first')}</option>`;
-  const d = await api(`/api/transactions?account_id=${aid}&limit=80`);
+async function crTxOptions(aid, sel, {blank, kind, anyAcct} = {}) {
+  if (!aid && !anyAcct) return `<option value="">${t('Choose the account first')}</option>`;
+  const d = await api('/api/transactions?' + new URLSearchParams([...(aid ? [['account_id', aid]] : []), ...(kind ? [['kind', kind]] : []), ['limit', '80']]));
   const items = d.items || [];
   if (sel && !items.some(x => x.id == sel)) { try { items.unshift(await api('/api/transactions/' + sel)); } catch (e) { /* deleted */ } }
   return `<option value="">${blank || t('— Choose a transaction —')}</option>` + items.map(x => `<option value="${x.id}" data-amt="${Math.abs(x.amount)}" ${x.id == sel ? 'selected' : ''}>${esc(x.date.slice(0, 10))} · ${esc(t(kindLabel[x.kind] || x.kind))} · ${esc(money(Math.abs(x.amount), x.currency))} · ${esc(x.merchant_name || x.category_label || x.note || '#' + x.id)}</option>`).join('');
@@ -116,29 +116,44 @@ async function creditUse(c, after) {
     <label class="f"><span>${t('Date')}</span><input name="date" type="date" value="${today()}"></label>
     <label class="f full"><span>${t('Note')}</span><input name="note" placeholder="${t('What it was used for')}"></label>
     ${c.ledger ? `<label class="f full"><span>${t('In the ledger')}</span><select name="mode">
+        <option value="split">${esc(t('Pay part of a recorded purchase'))}</option>
         <option value="rec">${esc(t('Record the spending from {acct}', {acct: c.hold_account_name || ''}))}</option>
-        <option value="link" ${c.account_type === 'credit_card' ? 'selected' : ''}>${esc(t('Link a transaction already on {acct}', {acct: c.hold_account_name || ''}))}</option></select></label>
+        <option value="link">${esc(t('Link a transaction already on {acct}', {acct: c.hold_account_name || ''}))}</option></select></label>
+      <p class="small muted full cu-split">${esc(t('The purchase is reduced by the amount used, and the credit\'s part is recorded as an expense from {acct} with the same category and merchant.', {acct: c.hold_account_name || ''}))}</p>
+      <label class="f cu-split"><span>${t('Account')}</span><select name="split_acct">${acctOptions(null, {blank: t('All accounts')})}</select></label>
+      <label class="f full cu-split"><span>${t('Purchase')}</span><select name="split_tx_id"></select></label>
       <label class="f cu-rec"><span>${t('Category')}</span><select name="category_id">${catOptions('expense', c.source !== 'bonus' ? c.category_id : null)}</select></label>
       <label class="f cu-rec"><span>${t('Merchant')}</span><input name="merchant" value="${esc(c.title || '')}"></label>
       <label class="f full cu-link"><span>${t('Transaction')}</span><select name="transaction_id"></select></label>` : `<p class="small muted full">${t('This credit is a note only: no transaction is recorded.')}</p>`}</form>`,
     {buttons: `<button class="btn" data-x2>${t('Cancel')}</button><button class="btn pri" data-ok>${t('Save')}</button>`});
   const f = $('#cuF', bg); $('[data-x2]', bg).onclick = bg.close;
-  let loaded = false;
+  let loaded = false, splitAcct = null;
   const sync = async () => {
     if (!c.ledger) return;
-    const link = f.mode.value === 'link';
-    $$('.cu-rec', f).forEach(x => x.hidden = link);
-    $('.cu-link', f).hidden = !link;
-    if (link && !loaded) { loaded = true; f.transaction_id.innerHTML = await crTxOptions(c.hold_account_id, null); }
+    const m = f.mode.value;
+    $$('.cu-rec', f).forEach(x => x.hidden = m !== 'rec');
+    $('.cu-link', f).hidden = m !== 'link';
+    $$('.cu-split', f).forEach(x => x.hidden = m !== 'split');
+    if (m === 'link' && !loaded) { loaded = true; f.transaction_id.innerHTML = await crTxOptions(c.hold_account_id, null); }
+    if (m === 'split' && splitAcct !== f.split_acct.value) {
+      splitAcct = f.split_acct.value;
+      f.split_tx_id.innerHTML = await crTxOptions(splitAcct, null, {kind: 'expense', anyAcct: true, blank: t('— Choose the purchase —')});
+    }
   };
+  const fillAmt = sel => { const o = sel.selectedOptions[0]; if (o && o.dataset.amt) f.amount.value = Math.min(+o.dataset.amt, c.remaining); };
   if (c.ledger) {
     f.mode.onchange = sync;
-    f.transaction_id.onchange = () => { const o = f.transaction_id.selectedOptions[0]; if (o && o.dataset.amt) f.amount.value = Math.min(+o.dataset.amt, c.remaining); };
+    f.split_acct.onchange = sync;
+    f.transaction_id.onchange = () => fillAmt(f.transaction_id);
+    f.split_tx_id.onchange = () => fillAmt(f.split_tx_id);
     sync();
   }
   $('[data-ok]', bg).onclick = async () => {
     const body = {amount: f.amount.value, date: f.date.value, note: f.note.value, force: !!c.expired};
-    if (c.ledger && f.mode.value === 'link') {
+    if (c.ledger && f.mode.value === 'split') {
+      if (!f.split_tx_id.value) return toast(t('Choose the transaction it paid for'), true);
+      body.split_tx_id = f.split_tx_id.value;
+    } else if (c.ledger && f.mode.value === 'link') {
       if (!f.transaction_id.value) return toast(t('Choose the transaction it paid for'), true);
       body.transaction_id = f.transaction_id.value;
     } else if (c.ledger) Object.assign(body, {category_id: f.category_id.value, merchant: f.merchant.value});
@@ -156,7 +171,7 @@ async function openCredit(id, after) {
     ${c.note ? `<div class="small muted">${esc(c.note)}</div>` : ''}
     ${c.ledger ? `<div class="small">📒 ${t('In the ledger')} · ${esc(c.hold_account_name || '')} · ${c.issue_tx ? `<a href="#" data-txo="${c.issue_tx.id}">${esc(t('added as {kind} #{id}', {kind: t(kindLabel[c.issue_tx.kind] || c.issue_tx.kind), id: c.issue_tx.id}))} · ${money(c.issue_tx.amount, c.issue_tx.currency)}</a>` : esc(t(CR_MODE[c.issue_mode] || ''))}${c.writeoff_tx ? ` · <a href="#" data-txo="${c.writeoff_tx.id}">${esc(t('forfeited #{id}', {id: c.writeoff_tx.id}))} · ${money(c.writeoff_tx.amount, c.writeoff_tx.currency)}</a>` : ''}</div>`
       : `<div class="small muted">${t('Note only (not in the ledger)')}</div>`}
-    <h3>${t('Uses')}</h3>${c.uses.length ? `<table class="t">${c.uses.map(u => `<tr><td>${esc(u.date)}</td><td>${esc(u.note || '')}${u.transaction_id ? `<div class="small"><a href="#" data-txo="${u.transaction_id}">${esc(t(u.auto_tx ? 'recorded #{id}' : 'linked #{id}', {id: u.transaction_id}))}${u.tx_category_name ? ' · ' + esc(u.tx_category_name) : ''}</a></div>` : ''}</td><td class="right">${money(u.amount, c.currency)}</td><td class="right"><button class="btn sm" data-undo="${u.id}" title="${t('Undo')}">↶</button></td></tr>`).join('')}</table>` : `<div class="small muted">${t('Not used yet')}</div>`}`,
+    <h3>${t('Uses')}</h3>${c.uses.length ? `<table class="t">${c.uses.map(u => `<tr><td>${esc(u.date)}</td><td>${esc(u.note || '')}${u.transaction_id ? `<div class="small"><a href="#" data-txo="${u.transaction_id}">${esc(t(u.auto_tx ? 'recorded #{id}' : 'linked #{id}', {id: u.transaction_id}))}${u.tx_category_name ? ' · ' + esc(u.tx_category_name) : ''}</a>${u.split_tx_id && u.split_tx_id !== u.transaction_id ? ` · <a href="#" data-txo="${u.split_tx_id}">${esc(t('part of #{id}', {id: u.split_tx_id}))}</a>` : ''}</div>` : ''}</td><td class="right">${money(u.amount, c.currency)}</td><td class="right"><button class="btn sm" data-undo="${u.id}" title="${t('Undo')}">↶</button></td></tr>`).join('')}</table>` : `<div class="small muted">${t('Not used yet')}</div>`}`,
     {wide: true, buttons: `<button class="btn danger" data-del>${t('Delete')}</button><span class="sp"></span>${c.state === 'void' || c.state === 'used' && c.status !== 'open' ? `<button class="btn" data-reo>${t('Reopen')}</button>` : `<button class="btn" data-void>${t('Close (forfeit the rest)')}</button>`}<button class="btn" data-ed>✎ ${t('Edit')}</button>${c.closed ? '' : `<button class="btn pri" data-use>${t('Use…')}</button>`}`});
   const done = () => { bg.close(); after(); };
   $$('[data-undo]', bg).forEach(b => b.onclick = async () => { await guard(() => api(`/api/credits/${c.id}/uses/${b.dataset.undo}`, {method: 'DELETE'})); done(); });

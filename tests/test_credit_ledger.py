@@ -124,3 +124,52 @@ def test_bonus_category_must_be_income(client):
     r = client.post("/api/credits", json={"title": "Fake", "source": "bonus", "amount": 5, "category_id": cat(client, "expense"),
                                           "expiry_date": exp(client)})
     assert r.status_code == 400 and "income" in r.json()["detail"]
+
+
+def test_credit_pays_part_of_a_recorded_purchase(client):
+    """A flight charged in full on a card, partly paid with an airline credit: the card charge drops by the credit used,
+    the credit's part is its own expense (same category / merchant) from the credit's account; undo puts it back."""
+    card = mk(client, name="Fake Visa", type="credit_card", currency="USD", opening_balance=0)
+    w = mk(client, name="Fake Airline Wallet", type="ewallet", currency="USD", opening_balance=0)
+    travel = cat(client, "expense")
+    buy = client.post("/api/transactions", json={"kind": "expense", "amount": 500, "account_id": card, "category_id": travel,
+                                                 "merchant": "Fake Air"}).json()
+    c = credit(client, account_id=w, source="cancel", amount=200, expiry_date=exp(client))
+    u = client.post(f"/api/credits/{c['id']}/use", json={"amount": 200, "split_tx_id": buy["id"]}).json()
+    assert u["state"] == "used", u
+    part = tx(client, u["uses"][0]["transaction_id"])
+    orig = tx(client, buy["id"])
+    assert orig["amount"] == 300 and orig["credits"][0]["role"] == "part"
+    assert part["kind"] == "expense" and part["amount"] == 200 and part["account_id"] == w
+    assert part["category_id"] == travel and part["merchant_name"] == "Fake Air" and part["credits"][0]["role"] == "use"
+    assert bal(client, w) == 0 and bal(client, card) == -300  # card owes 300 (shown negative as a liability balance)
+    # ledger off and on again: the purchase gets its amount back, then is split again
+    client.put(f"/api/credits/{c['id']}", json={"ledger": False})
+    assert tx(client, buy["id"])["amount"] == 500
+    on = client.put(f"/api/credits/{c['id']}", json={"ledger": True}).json()
+    assert tx(client, buy["id"])["amount"] == 300 and tx(client, on["uses"][0]["transaction_id"])["amount"] == 200
+    # deleting the credit's part from the transaction list: the purchase is whole again, the credit has its money back
+    client.delete(f"/api/transactions/{on['uses'][0]['transaction_id']}")
+    assert tx(client, buy["id"])["amount"] == 500 and client.get(f"/api/credits/{c['id']}").json()["remaining"] == 200
+    # undo after a split
+    u = client.post(f"/api/credits/{c['id']}/use", json={"amount": 50, "split_tx_id": buy["id"]}).json()
+    assert tx(client, buy["id"])["amount"] == 450
+    client.delete(f"/api/credits/{c['id']}/uses/{u['uses'][0]['id']}")
+    assert tx(client, buy["id"])["amount"] == 500
+
+
+def test_credit_pays_all_of_a_purchase_moves_it(client):
+    card = mk(client, name="Fake Visa", type="credit_card", currency="USD", opening_balance=0)
+    w = mk(client, name="Fake Airline Wallet", type="ewallet", currency="USD", opening_balance=0)
+    buy = client.post("/api/transactions", json={"kind": "expense", "amount": 80, "account_id": card}).json()
+    c = credit(client, account_id=w, source="bonus", amount=100, expiry_date=exp(client))
+    u = client.post(f"/api/credits/{c['id']}/use", json={"amount": 80, "split_tx_id": buy["id"]}).json()
+    assert u["uses"][0]["transaction_id"] == buy["id"] and tx(client, buy["id"])["account_id"] == w and u["remaining"] == 20
+    client.delete(f"/api/credits/{c['id']}/uses/{u['uses'][0]['id']}")
+    assert tx(client, buy["id"])["account_id"] == card
+    # refused: more than the purchase, a note-only credit
+    r = client.post(f"/api/credits/{c['id']}/use", json={"amount": 90, "split_tx_id": buy["id"]})
+    assert r.status_code == 400 and "at most" in r.json()["detail"]
+    n = credit(client, account_id=w, source="bonus", amount=10, expiry_date=exp(client), ledger=False)
+    r = client.post(f"/api/credits/{n['id']}/use", json={"amount": 5, "split_tx_id": buy["id"]})
+    assert r.status_code == 400 and "ledger" in r.json()["detail"]

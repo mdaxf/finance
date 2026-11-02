@@ -333,6 +333,8 @@ class Database:
                 out.append("transactions.as_expense")
             if "credits" in tables and "ledger" not in {r[1] for r in con.execute("PRAGMA table_info(credits)")}:
                 out.append("credits.ledger")
+            if "credit_uses" in tables and "split_tx_id" not in {r[1] for r in con.execute("PRAGMA table_info(credit_uses)")}:
+                out.append("credit_uses.split")
             return out
         finally:
             con.close()
@@ -685,12 +687,23 @@ class Database:
                              ("writeoff_category_id", "INTEGER")):
                 if col not in crcols:
                     con.execute(f"ALTER TABLE credits ADD COLUMN {col} {ddl}")
-            if "auto_tx" not in {r[1] for r in con.execute("PRAGMA table_info(credit_uses)")}:
-                con.execute("ALTER TABLE credit_uses ADD COLUMN auto_tx INTEGER DEFAULT 0")
+            # paying part of a recorded purchase with a credit: the purchase (split_tx_id) is reduced by split_amount and the
+            # credit's part is its own expense (transaction_id); if the credit paid all of it, the purchase moves to the
+            # holding account instead (split_from_account_id) and is the use's transaction
+            ucols = {r[1] for r in con.execute("PRAGMA table_info(credit_uses)")}
+            for col, ddl in (("auto_tx", "INTEGER DEFAULT 0"), ("split_tx_id", "INTEGER"), ("split_amount", "REAL"),
+                             ("split_from_account_id", "INTEGER")):
+                if col not in ucols:
+                    con.execute(f"ALTER TABLE credit_uses ADD COLUMN {col} {ddl}")
             # deleting a transaction: a use whose spending was created for it is undone (money back on the credit); a
             # linked one is unlinked; an issue / write-off transaction is detached (issue_mode -> none)
             con.execute("DROP TRIGGER IF EXISTS trg_tx_delete_credit_use")  # replaced by trg_tx_delete_credit
-            con.execute("""CREATE TRIGGER IF NOT EXISTS trg_tx_delete_credit AFTER DELETE ON transactions BEGIN
+            con.execute("DROP TRIGGER IF EXISTS trg_tx_delete_credit")  # rebuilt every start (its body changes with the schema)
+            con.execute("""CREATE TRIGGER trg_tx_delete_credit AFTER DELETE ON transactions BEGIN
+                UPDATE transactions SET amount=ROUND(amount + (SELECT COALESCE(SUM(u.split_amount),0) FROM credit_uses u
+                    WHERE u.split_tx_id=transactions.id AND u.transaction_id=OLD.id AND u.auto_tx=1), 2)
+                    WHERE id IN (SELECT split_tx_id FROM credit_uses WHERE transaction_id=OLD.id AND auto_tx=1);
+                UPDATE credit_uses SET split_tx_id=NULL WHERE split_tx_id=OLD.id;
                 UPDATE credits SET remaining=MIN(amount, remaining + (SELECT COALESCE(SUM(u.amount),0) FROM credit_uses u
                     WHERE u.credit_id=credits.id AND u.transaction_id=OLD.id AND u.auto_tx=1)),
                     status=CASE WHEN status='void' THEN 'void' ELSE 'open' END

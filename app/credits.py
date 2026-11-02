@@ -8,7 +8,8 @@ credit's own account, else the system 'Credits 抵用金' account) and every ste
             transaction already recorded, e.g. the reimbursement of a cancelled flight) | balance (already in the
             account's balance, e.g. its opening balance) | none
   use       an expense from the holding account (created: credit_uses.auto_tx=1), or a link to a transaction already
-            recorded on it (a card statement credit offsetting a charge on that card)
+            recorded on it (a card statement credit offsetting a charge on that card), or paying part of a recorded
+            purchase on any account (split_tx_id): the purchase is reduced and the credit's part is its own expense
   close     what is forfeited comes off the issue transaction (post), else a write-off expense (writeoff_tx_id)
 With `ledger` off a credit is a NOTE, like a card hold: never a transaction, so balances and stats ignore it.
 Fields: account (optional: issuer-only credits), source (refund | cancel | bonus), amount, remaining, currency, issued date, expiry date, issuer /
@@ -388,9 +389,16 @@ def _sync_ledger(con, cid: int, rates) -> None:
             con.execute("UPDATE credits SET issue_tx_id=NULL, issue_auto=0 WHERE id=?", (cid,))
             _drop_tx(con, c["issue_tx_id"])
         for u in uses:
+            sp = con.execute("SELECT * FROM transactions WHERE id=?", (u["split_tx_id"],)).fetchone() if u.get("split_tx_id") else None
             if u.get("auto_tx") and u.get("transaction_id"):
                 con.execute("UPDATE credit_uses SET transaction_id=NULL WHERE id=?", (u["id"],))  # stays auto: back if ledger is on again
                 _drop_tx(con, u["transaction_id"])
+                if sp and u.get("split_amount"):  # the purchase it paid part of gets its full amount back (kept: split again when on)
+                    _update_tx(con, sp["id"], {"amount": _r2(sp["amount"] + u["split_amount"]), "currency": sp["currency"]}, rates)
+            elif sp and u.get("split_from_account_id") and u.get("transaction_id") == sp["id"]:
+                con.execute("UPDATE credit_uses SET transaction_id=NULL WHERE id=?", (u["id"],))
+                if con.execute("SELECT 1 FROM accounts WHERE id=?", (u["split_from_account_id"],)).fetchone():
+                    _update_tx(con, sp["id"], {"account_id": u["split_from_account_id"], "currency": sp["currency"]}, rates)
         if c.get("writeoff_tx_id"):
             con.execute("UPDATE credits SET writeoff_tx_id=NULL WHERE id=?", (cid,))
             _drop_tx(con, c["writeoff_tx_id"])
@@ -424,7 +432,23 @@ def _sync_ledger(con, cid: int, rates) -> None:
             con.execute("UPDATE credits SET issue_tx_id=?, issue_auto=1 WHERE id=?", (tid, cid))
     # uses: each one is spending from the holding account
     for u in uses:
-        if not u.get("transaction_id"):
+        sp = con.execute("SELECT * FROM transactions WHERE id=?", (u["split_tx_id"],)).fetchone() if u.get("split_tx_id") else None
+        if not u.get("transaction_id") and sp and u.get("split_from_account_id"):  # paid all of a purchase: it moves here again
+            _update_tx(con, sp["id"], {"account_id": hold["id"], "currency": c["currency"]}, rates)
+            con.execute("UPDATE credit_uses SET transaction_id=?, auto_tx=0 WHERE id=?", (sp["id"], u["id"]))
+        elif not u.get("transaction_id") and sp and u.get("split_amount") and sp["amount"] > u["split_amount"] + EPS:  # split again
+            _update_tx(con, sp["id"], {"amount": _r2(sp["amount"] - u["split_amount"]), "currency": sp["currency"]}, rates)
+            tid = _insert_tx(con, {"kind": "expense", "date": sp["date"], "amount": u["amount"], "currency": c["currency"],
+                                   "account_id": hold["id"], "category_id": sp["category_id"], "merchant_id": sp["merchant_id"],
+                                   "member_id": sp["member_id"], "project_id": sp["project_id"], "ledger_id": sp["ledger_id"],
+                                   "tags": sp["tags"], "note": u.get("note") or f"Paid with credit: {label} (part of #{sp['id']})",
+                                   "source": "credit", "is_demo": c.get("is_demo") or 0}, rates)
+            con.execute("UPDATE credit_uses SET transaction_id=?, auto_tx=1 WHERE id=?", (tid, u["id"]))
+        elif u.get("transaction_id") and u.get("split_from_account_id"):  # a moved purchase follows the holding account
+            t = con.execute("SELECT account_id FROM transactions WHERE id=?", (u["transaction_id"],)).fetchone()
+            if t and t["account_id"] != hold["id"]:
+                _update_tx(con, u["transaction_id"], {"account_id": hold["id"], "currency": c["currency"]}, rates)
+        elif not u.get("transaction_id"):
             tid = _insert_tx(con, {"kind": "expense", "date": u["date"], "amount": u["amount"], "currency": c["currency"],
                                    "account_id": hold["id"], "note": u.get("note") or f"Paid with credit: {label}",
                                    "source": "credit", "is_demo": c.get("is_demo") or 0}, rates)
@@ -503,7 +527,9 @@ def delete(db: Database, cid: int) -> dict:
 def use(db: Database, cid: int, body: dict | None = None) -> dict:
     """Mark used: {amount?} (blank = everything left -> used; less = partially used), {date?, note?, transaction_id?}.
     In the ledger: without transaction_id an expense is recorded from the holding account ({category_id?, merchant?});
-    with one, that transaction (on the holding account) is linked instead.
+    with one, that transaction (on the holding account) is linked instead. {split_tx_id}: a recorded purchase the credit
+    paid part of: it is reduced by the amount used and the credit's part is recorded as an expense from the holding
+    account with the purchase's category / merchant / member / project (paid all of it: the purchase moves there).
     Using an expired credit is refused unless {force: true} (some merchants honour it anyway)."""
     body = body or {}
     c = get(db, cid, with_uses=False)
@@ -520,7 +546,24 @@ def use(db: Database, cid: int, body: dict | None = None) -> dict:
     rem = _r2(max(c["remaining"] - amt, 0))
     when = _day(body.get("date"), "Date") or today(db).isoformat()
     tid = _id(body.get("transaction_id"), "Transaction")
+    sid = _id(body.get("split_tx_id"), "Transaction")
     note = str(body.get("note") or "").strip()[:500]
+    sp = None
+    if sid:
+        if not c["ledger"]:
+            raise ValidationError("Paying part of a transaction records the credit's part as an expense: turn on 'Record in the ledger' for this credit")
+        sp = db.one("SELECT * FROM transactions WHERE id=?", (sid,))
+        if not sp:
+            raise ValidationError(f"Transaction #{sid} not found")
+        if sp["kind"] != "expense":
+            raise ValidationError("Choose an expense: the credit pays part of a purchase")
+        if sp["currency"] != c["currency"]:
+            raise ValidationError(f"That transaction is in {sp['currency']}, the credit in {c['currency']}")
+        if amt > sp["amount"] + EPS:
+            raise ValidationError(f"The credit can pay at most the purchase amount ({sp['amount']:,.2f})")
+        if db.one("SELECT id FROM credit_uses WHERE split_tx_id=? OR transaction_id=?", (sid, sid)):
+            raise ValidationError(f"Transaction #{sid} is already paid in part by a credit")
+        tid = None
     if tid:
         t = db.one("SELECT id, account_id FROM transactions WHERE id=?", (tid,))
         if not t:
@@ -532,8 +575,24 @@ def use(db: Database, cid: int, body: dict | None = None) -> dict:
                                       "link a transaction on that account, or let it record the spending")
     rates = _rates(db)
     with db.tx() as con:
-        auto = 0
-        if not tid and c["ledger"]:
+        auto, split = 0, (None, None, None)
+        if sp:
+            hold = hold_account(con, c)
+            if amt >= sp["amount"] - EPS:  # the credit paid all of it: the purchase itself moves to the holding account
+                _update_tx(con, sid, {"account_id": hold["id"], "currency": c["currency"]}, rates)
+                tid, split = sid, (sid, 0, sp["account_id"])
+            else:
+                _update_tx(con, sid, {"amount": _r2(sp["amount"] - amt), "currency": c["currency"],
+                                      "tax_amount": None, "tip_amount": None, "tax_rate": sp["tax_rate"]}
+                           if (sp["tax_amount"] or 0) + (sp["tip_amount"] or 0) > sp["amount"] - amt + EPS
+                           else {"amount": _r2(sp["amount"] - amt), "currency": c["currency"]}, rates)
+                data = {"kind": "expense", "date": sp["date"], "amount": amt, "currency": c["currency"], "account_id": hold["id"],
+                        "category_id": sp["category_id"], "merchant_id": sp["merchant_id"], "member_id": sp["member_id"],
+                        "project_id": sp["project_id"], "ledger_id": sp["ledger_id"], "tags": sp["tags"],
+                        "note": note or f"Paid with credit: {_label(c)} (part of #{sid})", "source": "credit",
+                        "is_demo": c.get("is_demo") or 0}
+                tid, auto, split = _insert_tx(con, data, rates), 1, (sid, amt, None)
+        elif not tid and c["ledger"]:
             hold = hold_account(con, c)
             data = {"kind": "expense", "date": when, "amount": amt, "currency": c["currency"], "account_id": hold["id"],
                     "category_id": _id(body.get("category_id"), "Category"), "note": note or f"Paid with credit: {_label(c)}",
@@ -543,8 +602,8 @@ def use(db: Database, cid: int, body: dict | None = None) -> dict:
             if data["category_id"] and not con.execute("SELECT 1 FROM categories WHERE id=? AND kind='expense'", (data["category_id"],)).fetchone():
                 raise ValidationError("Category must be an expense category")
             tid, auto = _insert_tx(con, data, rates), 1
-        con.execute("INSERT INTO credit_uses(credit_id, amount, date, note, transaction_id, auto_tx, created_at) VALUES(?,?,?,?,?,?,?)",
-                    (cid, amt, when, note, tid, auto, now_iso()))
+        con.execute("""INSERT INTO credit_uses(credit_id, amount, date, note, transaction_id, auto_tx, split_tx_id, split_amount,
+                       split_from_account_id, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)""", (cid, amt, when, note, tid, auto, *split, now_iso()))
         con.execute("UPDATE credits SET remaining=?, status=?, updated_at=? WHERE id=?",
                     (rem, "used" if rem < EPS else "open", now_iso(), cid))
     _sync_reminders(db)
@@ -557,10 +616,17 @@ def undo_use(db: Database, cid: int, use_id: int) -> dict:
         raise NotFound(use_id)
     c = db.one("SELECT * FROM credits WHERE id=?", (cid,))
     rem = _r2(min((c["remaining"] or 0) + u["amount"], c["amount"]))
+    rates = _rates(db)
     with db.tx() as con:
         con.execute("DELETE FROM credit_uses WHERE id=?", (use_id,))
         if u.get("auto_tx"):
             _drop_tx(con, u.get("transaction_id"))  # the spending it recorded
+        sp = con.execute("SELECT * FROM transactions WHERE id=?", (u["split_tx_id"],)).fetchone() if u.get("split_tx_id") else None
+        if sp and u.get("split_from_account_id"):  # it had moved to the holding account: back where it was
+            if con.execute("SELECT 1 FROM accounts WHERE id=?", (u["split_from_account_id"],)).fetchone():
+                _update_tx(con, sp["id"], {"account_id": u["split_from_account_id"], "currency": sp["currency"]}, rates)
+        elif sp and u.get("split_amount"):  # the purchase gets its full amount back
+            _update_tx(con, sp["id"], {"amount": _r2(sp["amount"] + u["split_amount"]), "currency": sp["currency"]}, rates)
         con.execute("UPDATE credits SET remaining=?, status=CASE WHEN status='void' THEN 'void' ELSE 'open' END, updated_at=? WHERE id=?",
                     (rem, now_iso(), cid))
     _sync_reminders(db)
@@ -635,9 +701,12 @@ def annotate(db: Database, rows: list[dict]) -> list[dict]:
         for role in ("issue", "writeoff"):
             if k[f"{role}_tx_id"] in ids:
                 found.setdefault(k[f"{role}_tx_id"], []).append({"id": k["id"], "title": _label(k), "role": role})
-    for k in db.all(f"""SELECT u.transaction_id, u.amount, c.id, c.title, c.source FROM credit_uses u JOIN credits c ON c.id=u.credit_id
-                        WHERE u.transaction_id IN ({q})""", ids):
-        found.setdefault(k["transaction_id"], []).append({"id": k["id"], "title": _label(k), "role": "use", "amount": k["amount"]})
+    for k in db.all(f"""SELECT u.transaction_id, u.split_tx_id, u.amount, c.id, c.title, c.source FROM credit_uses u
+                        JOIN credits c ON c.id=u.credit_id WHERE u.transaction_id IN ({q}) OR u.split_tx_id IN ({q})""", ids + ids):
+        if k["transaction_id"] in ids:
+            found.setdefault(k["transaction_id"], []).append({"id": k["id"], "title": _label(k), "role": "use", "amount": k["amount"]})
+        if k["split_tx_id"] in ids and k["split_tx_id"] != k["transaction_id"]:
+            found.setdefault(k["split_tx_id"], []).append({"id": k["id"], "title": _label(k), "role": "part", "amount": k["amount"]})
     for r in rows:
         if r.get("id") in found:
             r["credits"] = found[r["id"]]
