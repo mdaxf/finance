@@ -159,6 +159,10 @@ def build(db: Database, kind: str, today: date | None = None, lng: str | None = 
             title = (r.get("reward_icon") or "⭐") + " " + reminder_text(r, zh, lang(db, lng) == "zh-TW")
         if r["kind"] == "bill":  # bill / payment request from an email
             title = "🧾 " + title
+        if r["kind"] == "low_balance":  # a bank account may drop below its alert threshold
+            from .cashflow import reminder_text as low_text
+            title = "📉 " + low_text(r, zh, lang(db, lng) == "zh-TW")
+            amt = None
         due_rows.append([r["due_date"] or "", title, when, _money(amt, r["currency"]) if amt else ""])
     if kind == "reminders":
         subject = f"⏰ {L['subject_rem'].format(n=len(due))}"

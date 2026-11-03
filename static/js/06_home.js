@@ -50,9 +50,11 @@ VIEWS.home = async (v) => {
     <div class="card home-add">
       <form class="qa" id="hqForm" autocomplete="off"><input id="hqInput" enterkeyhint="send" placeholder="Quick add: lunch 25.5 chase · 午饭 35 支付宝"><button type="button" class="btn" id="hqFormBtn">✎<span class="hide-s"> Review</span></button><button class="btn pri" id="hqAdd">Add</button></form>
       <button type="button" class="btn" id="hqDetail">+ Detailed</button></div>
+    <div id="hmFc"></div>
     <div id="hmRem"></div>
     <div class="card home-list"><div id="hmList" class="hlist"></div></div></div>`;
   api('/api/reminders?view=open').then(d => { if (!v.isConnected) return; if (d.items.length) $('#hmRem').innerHTML = `<div class="card"><div class="row" style="justify-content:space-between"><b>⏰ Reminders</b><a href="#/reminders" class="small">All 全部 ›</a></div>${d.items.slice(0, 5).map(remLine).join('')}</div>`; }).catch(() => {});
+  cfHome(v, $('#hmFc'));
   const go = m => { S.homeMonth = m === thisMonth() ? null : m; route(); };
   api(`/api/summary/month?month=${month}${lq}`).then(s => {
     if (!v.isConnected) return;  // left Home before the totals arrived
@@ -133,13 +135,14 @@ VIEWS.account = async (v, rest, ctx = {}) => {
         <div class="small muted">${esc(a.type_label)} · ${a.currency}${a.institution ? ' · ' + esc(a.institution) : ''}${a.type === 'credit_card' && a.card_expiry ? ' · ' + cardExpiryPill(a) : ''}${a.reconciled_at ? ` · <a href="javascript:void 0" class="rec-link" id="ahRec">✔ Reconciled ${esc(a.reconciled_at.slice(0, 10))}</a>` : ''}</div></div>
         <div class="ah-bal"><div class="lbl small muted">${owed ? 'Owed' : 'Balance'}</div><div class="val ${owed ? (a.owed > 0 ? 'neg' : '') : a.balance < 0 ? 'neg' : ''}">${money(owed ? a.owed : a.balance, a.currency)}</div>
         ${a.is_investment ? `<div class="small muted">Cash ${money(a.cash_balance, a.currency)} · Holdings ${money(a.holdings_value, a.currency)}</div>` : ''}</div></div>
-      <div class="row ah-acts"><button class="btn pri" id="ahAdd">+ Add 记一笔</button><button class="btn" id="ahSet">⚖️ Set balance</button><button class="btn" id="ahReconcile">✔ Reconcile</button><button class="btn" id="ahEdit">Edit</button>
+      <div class="row ah-acts"><button class="btn pri" id="ahAdd">+ Add 记一笔</button><button class="btn" id="ahSet">⚖️ Set balance</button><button class="btn" id="ahReconcile">✔ Reconcile</button>${cfAlertable(a.type) ? `<button class="btn" id="ahFc">📉 ${t('Forecast')}</button>` : ''}<button class="btn" id="ahEdit">Edit</button>
         <a class="btn" href="#/transactions/?account_id=${a.id}">🧾 <span class="hide-s">In Transactions</span></a></div>`;
     if ($('#ahBack')) $('#ahBack').onclick = e => { if (S.invPR && S.invPR.fromList) { e.preventDefault(); S.invPR.fromList = false; history.back(); } };
     $('#ahAdd').onclick = () => openTx(null, after, {account_id: a.id, currency: a.currency});
     $('#ahSet').onclick = () => adjustForm(a);
     $('#ahReconcile').onclick = () => reconcileDialog(a);
     $('#ahEdit').onclick = () => acctForm(a);
+    if ($('#ahFc')) $('#ahFc').onclick = () => forecastDialog(a.id, null, after);
     if ($('#ahRec')) $('#ahRec').onclick = () => reconcileHistory(a);
     const lbl = h.start ? `${h.start}${h.end ? ' – ' + h.end : ' – today'}` : (h.end ? `… – ${h.end}` : 'All time');
     $('#ahSum').innerHTML = `<span>${esc(lbl)}</span><span>${owed ? 'Owed' : 'Balance'} at start <b>${money(b.opening, a.currency)}</b> → end <b>${money(b.closing, a.currency)}</b></span>

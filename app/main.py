@@ -25,7 +25,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from . import backup as bk
 from . import agent_api, config, demo, email_reports, mailer, offsite, importers, ingest, ledger, loans, plan_lines, taxtips, principal, projects, quotes, receipts, reimburse, reminders, reconcile, reserves, returns, schedules
-from . import bills, credits, rewards
+from . import bills, cashflow, credits, rewards
 from .db import ACCOUNT_TYPES, BASE_DIR, Database, now_iso
 from .email_rules import parse_email
 
@@ -194,14 +194,15 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
                     "lock_reconciled", "receipts_dir", "receipts_pattern",
                     "reminder_lead_days", "reminder_notify", "backup_dir", "backup_receipts", "card_expiry_lead_days",
                     "reserve_release_days", "reserve_hold_days", "credit_expiry_lead_months", "bill_reminder_lead_days",
-                    "bill_match_tolerance", "bill_match_days"]
+                    "bill_match_tolerance", "bill_match_days", "low_balance_days", "low_balance_bill_account_id"]
     SETTING_DEFAULTS = {"schedule_run_time": "00:15", "schedule_catchup_days": "90", "timezone": schedules.DEFAULT_TZ, "lock_reconciled": "0",
                         "receipts_dir": "", "receipts_pattern": "{yyyy}/{mm}/{dd}",
                         "reminder_lead_days": "10", "reminder_notify": "off", "backup_dir": "", "backup_receipts": "1",
                         "card_expiry_lead_days": str(reminders.EXPIRY_LEAD_DEFAULT),
                         "reserve_release_days": str(reserves.RELEASE_DAYS_DEFAULT), "reserve_hold_days": str(reserves.HOLD_DAYS_DEFAULT),
                         "credit_expiry_lead_months": str(credits.LEAD_MONTHS_DEFAULT), "bill_reminder_lead_days": str(bills.LEAD_DAYS_DEFAULT),
-                        "bill_match_tolerance": f"{bills.MATCH_TOL_ABS_DEFAULT:.2f}", "bill_match_days": str(bills.MATCH_DAYS_DEFAULT)}
+                        "bill_match_tolerance": f"{bills.MATCH_TOL_ABS_DEFAULT:.2f}", "bill_match_days": str(bills.MATCH_DAYS_DEFAULT),
+                        "low_balance_days": str(cashflow.DAYS_DEFAULT), "low_balance_bill_account_id": ""}
 
     @app.get("/api/meta")
     def meta():
@@ -215,7 +216,7 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
             "merchants": db.all("SELECT * FROM merchants ORDER BY name"),
             "projects": db.all("SELECT * FROM projects ORDER BY archived, name"),
             "plan_lines": db.all("SELECT id, project_id, name, sort FROM project_plan_lines ORDER BY project_id, sort, id"),
-            "accounts": db.all("""SELECT id, name, type, currency, archived, aliases, last4, system_role,
+            "accounts": db.all("""SELECT id, name, type, currency, archived, aliases, last4, system_role, pay_from_account_id,
                 (SELECT MAX(as_of) FROM reconciliations r WHERE r.account_id=accounts.id) reconciled_at
                 FROM accounts ORDER BY archived, sort, name"""),
             "currencies": db.all("SELECT * FROM fx_rates ORDER BY currency"),
@@ -306,6 +307,14 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
                     if not 0 <= f <= 1000:
                         raise HTTPException(400, "Payment match tolerance must be 0–1000")
                     v = f"{f:.2f}"
+                if k == "low_balance_days":
+                    if not str(v).strip().isdigit() or not 1 <= int(str(v).strip()) <= cashflow.MAX_DAYS:
+                        raise HTTPException(400, f"Low balance look-ahead days must be 1–{cashflow.MAX_DAYS}")
+                    v = str(int(str(v).strip()))
+                if k == "low_balance_bill_account_id":
+                    v = str(v or "").strip()
+                    if v and not (v.isdigit() and db.one("SELECT 1 x FROM accounts WHERE id=?", (int(v),))):
+                        raise HTTPException(400, "Account for bills not found")
                 if k == "backup_receipts":
                     v = "0" if str(v).lower() in ("0", "false", "off", "no", "") else "1"
                 if k == "receipts_pattern":
@@ -369,7 +378,8 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
     # ------------------------------------------------------------ accounts
     ACCT_FIELDS = ["group_id", "name", "type", "currency", "opening_balance", "credit_limit", "institution", "last4",
                    "aliases", "note", "archived", "sort", "opening_returns",
-                   "stmt_day", "due_day", "due_after_days", "remind_days", "autopay", "min_pay_pct", "card_expiry"]
+                   "stmt_day", "due_day", "due_after_days", "remind_days", "autopay", "min_pay_pct", "card_expiry",
+                   "low_bal_threshold", "low_bal_days", "pay_from_account_id"]
 
     def _acct_data(body: dict, partial=False) -> dict:
         d = {k: body[k] for k in ACCT_FIELDS if k in body}
@@ -387,10 +397,11 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
         if not d.get("group_id") and d.get("type"):
             g = db.one("SELECT id FROM account_groups WHERE name=?", (ACCOUNT_TYPES[d["type"]][1],))
             d["group_id"] = g["id"] if g else None
-        for k in ("opening_balance", "credit_limit", "opening_returns", "min_pay_pct"):
+        for k in ("opening_balance", "credit_limit", "opening_returns", "min_pay_pct", "low_bal_threshold"):
             if k in d:
                 d[k] = None if d[k] in ("", None) else float(d[k])
-        for k, lo, hi in (("stmt_day", 1, 31), ("due_day", 1, 31), ("due_after_days", 1, 60), ("remind_days", 0, 60)):
+        for k, lo, hi in (("stmt_day", 1, 31), ("due_day", 1, 31), ("due_after_days", 1, 60), ("remind_days", 0, 60),
+                         ("low_bal_days", 1, cashflow.MAX_DAYS), ("pay_from_account_id", 1, 10 ** 9)):
             if k in d:
                 try:
                     d[k] = None if d[k] in ("", None) else int(d[k])
@@ -398,6 +409,9 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
                     raise HTTPException(400, f"{k} must be a whole number")
                 if d[k] is not None and not lo <= d[k] <= hi:
                     raise HTTPException(400, f"{k} must be between {lo} and {hi}")
+        if d.get("pay_from_account_id") and not db.one("SELECT 1 x FROM accounts WHERE id=? AND type IN (%s)"
+                                                          % ",".join("?" * len(cashflow.TYPES)), (d["pay_from_account_id"], *cashflow.TYPES)):
+            raise HTTPException(400, "Choose a bank / cash account to pay the card from")
         if "card_expiry" in d:
             try:
                 d["card_expiry"] = reminders.parse_expiry(d["card_expiry"])
@@ -576,6 +590,23 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
             return ledger.account_history(db, aid, dict(request.query_params))
         except KeyError:
             raise HTTPException(404, "Account not found")
+
+    @app.get("/api/accounts/{aid}/forecast")
+    def account_forecast(aid: int, days: int | None = None, threshold: float | None = None):
+        """Low balance 余额预警: day-by-day balance for the next `days` (default: the account's look-ahead, else the setting
+        low_balance_days, 14) from posted + pending transactions, schedules, open bills and card statements paid from it.
+        Returns {start_balance, daily [{date, balance}], events [{date, source, title, amount, balance, …}], lowest,
+        first_below (vs `threshold`, default the account's alert threshold), below, unknown_count}."""
+        try:
+            return cashflow.forecast(db, aid, days, threshold=threshold)
+        except KeyError:
+            raise HTTPException(404, "Account not found")
+
+    @app.get("/api/forecast/alerts")
+    def forecast_alerts():
+        """Home: the balance forecast of every account with a low balance alert ({items}: below first, then by the
+        margin over the threshold)."""
+        return {"items": cashflow.outlook(db)}
 
     @app.get("/api/accounts/{aid}/investment-series")
     def investment_series(aid: int, request: Request):

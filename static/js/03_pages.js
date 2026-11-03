@@ -106,6 +106,7 @@ function acctForm(a) {
    <label class="f" data-cc><span>Remind days before due</span><input name="remind_days" type="number" min="0" max="60" value="${a.remind_days ?? ''}" placeholder="default (Settings, 10)"></label>
    <label class="f" data-cc><span>Minimum payment %</span><input name="min_pay_pct" type="number" step="0.1" value="${a.min_pay_pct ?? ''}"></label>
    <label class="f" data-cc><span>Card expires (MM/YY)</span><input name="card_expiry" placeholder="MM/YY" maxlength="7" inputmode="numeric" value="${a.card_expiry ? esc(a.card_expiry.slice(5, 7) + '/' + a.card_expiry.slice(2, 4)) : ''}"><span class="small muted">Valid through the end of that month. You'll be reminded to move autopayments to the new card before it expires.</span></label>
+   ${cfAcctFields(a)}
    <label class="f" data-cc><span>Autopay</span><span><input type="checkbox" name="autopay" ${a.autopay ? 'checked' : ''}> on</span></label>
    <label class="f"><span>Institution</span><input name="institution" value="${esc(a.institution || '')}"></label>
    <label class="f"><span>Last 4 digits (matches email alerts)</span><input name="last4" maxlength="5" value="${esc(a.last4 || '')}"></label>
@@ -115,13 +116,14 @@ function acctForm(a) {
    <label class="chk"><input type="checkbox" name="is_default" ${S.meta.settings.default_account_id == a.id && a.id ? 'checked' : ''}> Default account for quick-add</label>
   </form>`, {buttons: `${isNew ? '' : '<button class="btn danger" data-del>Delete</button><span class="sp"></span>'}<button class="btn" data-x2>Cancel</button><button class="btn pri" data-ok>Save</button>`});
   const f = $('#af', bg);
-  const upd = () => { const l = liab(f.type.value); if ($('#obLbl', bg)) $('#obLbl', bg).textContent = l ? 'Amount owed at start' : 'Opening balance'; $$('[data-cc]', bg).forEach(x => x.style.display = f.type.value === 'credit_card' ? '' : 'none'); $('[data-inv]', bg).style.display = isInvType(f.type.value) ? '' : 'none'; };
+  const upd = () => { const l = liab(f.type.value); if ($('#obLbl', bg)) $('#obLbl', bg).textContent = l ? 'Amount owed at start' : 'Opening balance'; $$('[data-cc]', bg).forEach(x => x.style.display = f.type.value === 'credit_card' ? '' : 'none'); $$('[data-lb]', bg).forEach(x => x.style.display = cfAlertable(f.type.value) ? '' : 'none'); $('[data-inv]', bg).style.display = isInvType(f.type.value) ? '' : 'none'; };
   f.type.onchange = upd; upd();
   if (f.balance) f.balance.oninput = () => { $('#brWrap', bg).style.display = f.balance.value !== '' && +f.balance.value !== +f.balance.dataset.orig ? '' : 'none'; };
   $('[data-x2]', bg).onclick = bg.close;
   $('[data-ok]', bg).onclick = async () => {
     const o = Object.fromEntries(new FormData(f)); o.archived = f.archived && f.archived.checked ? 1 : 0;
-    if (o.type === 'credit_card') o.autopay = f.autopay.checked ? 1 : 0; else ['stmt_day', 'due_day', 'due_after_days', 'remind_days', 'min_pay_pct', 'autopay', 'card_expiry'].forEach(k => delete o[k]);
+    if (o.type === 'credit_card') o.autopay = f.autopay.checked ? 1 : 0; else ['stmt_day', 'due_day', 'due_after_days', 'remind_days', 'min_pay_pct', 'autopay', 'card_expiry', 'pay_from_account_id'].forEach(k => delete o[k]);
+    if (!cfAlertable(o.type)) { delete o.low_bal_threshold; delete o.low_bal_days; }
     const isDef = f.is_default.checked; delete o.is_default;
     if (isNew) o.opening_balance = (+o.opening_balance || 0) * (liab(o.type) ? -1 : 1);
     else { delete o.opening_balance; const bi = f.balance; if (bi.value === '' || +bi.value === +bi.dataset.orig) { delete o.balance; delete o.balance_reason; } else o.balance = +bi.value; }

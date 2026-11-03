@@ -170,6 +170,8 @@ def run(db: Database, on: date | None = None, notify: bool = True) -> dict:
     sync_loans(db, on)
     from .rewards import sync_reminders as sync_rewards
     sync_rewards(db, on)
+    from .cashflow import sync_reminders as sync_low
+    sync_low(db, on)
     new = generate_cards(db, on) + generate_expiry(db, on) + generate_reserves(db, on) + generate_credits(db, on) + generate_bills(db, on)
     done = refresh(db, on) + refresh_expiry(db, on) + refresh_reserves(db, on) + refresh_credits(db, on) + refresh_bills(db, on)
     sent = notify_due(db, on) if notify else 0
@@ -216,6 +218,9 @@ def _decorate(db: Database, r: dict, on: date) -> dict:
         r["expired"] = bool(due and due < on)
     if r["kind"] == "bill":
         r.update(bill_info(db, r))
+    if r["kind"] == "low_balance":  # the forecast may drop below the account's alert threshold
+        from .cashflow import reminder_info as low_info
+        r.update(low_info(db, r))
     if r["kind"] == "reward":  # miles / points about to expire
         from .rewards import reminder_info
         r.update(reminder_info(db, r))
@@ -228,6 +233,8 @@ def lead_days(db: Database, r: dict) -> int:
     reminder_lead_days (default 10)."""
     if r.get("kind") == "card_expiry":
         return expiry_lead(db)
+    if r.get("kind") == "low_balance":  # shown at once: due_date is already inside the look-ahead window
+        return 3650
     if r.get("kind") == "reserve":
         return 0  # an unreleased hold / unrefunded deposit is chased from its due date (check-out + N days) on
     if r.get("kind") == "credit":  # the whole window: credit_expiry_lead_months (default 6) before the expiry date
@@ -265,6 +272,8 @@ def listing(db: Database, view: str = "open", on: date | None = None) -> dict:
     sync_bills(db, on)
     from .rewards import sync_reminders as sync_rewards
     sync_rewards(db, on)
+    from .cashflow import sync_reminders as sync_low
+    sync_low(db, on)
     rows = [_decorate(db, r, on) for r in db.all("SELECT * FROM reminders ORDER BY due_date, id")]
     counts = {k: sum(1 for r in rows if r["state"] == k) for k in ("upcoming", "later", "overdue", "snoozed", "done")}
     if view == "open":
@@ -292,6 +301,8 @@ def badge(db: Database, on: date | None = None, rows: list | None = None) -> int
         sync_bills(db, on)
         from .rewards import sync_reminders as sync_rewards
         sync_rewards(db, on)
+        from .cashflow import sync_reminders as sync_low
+        sync_low(db, on)
     rows = rows if rows is not None else [_decorate(db, r, on) for r in db.all("SELECT * FROM reminders WHERE status='open'")]
     return sum(1 for r in rows if r["state"] in ("overdue", "upcoming"))
 
@@ -435,7 +446,7 @@ def digest(db: Database, days: int = 7, include_overdue: bool = True, lang: str 
     rows = listing(db, "open", on)["items"]  # 'open' already excludes items before their lead window
     # card expiry reminders are listed during their whole lead window (default 60 days), not only the next `days`
     items = [r for r in rows if (r["state"] == "overdue" and include_overdue) or
-             (r["state"] == "upcoming" and r["days_left"] is not None and (r["days_left"] <= days or r["kind"] in ("card_expiry", "credit", "reward")))]
+             (r["state"] == "upcoming" and r["days_left"] is not None and (r["days_left"] <= days or r["kind"] in ("card_expiry", "credit", "reward", "low_balance")))]
     from .ingest import fmt_money
     lines = []
     for r in items:
@@ -450,6 +461,11 @@ def digest(db: Database, days: int = 7, include_overdue: bool = True, lang: str 
         if r["kind"] == "credit":
             r["detail"] = credit_text(r, zh)
             lines.append(f"{'⚠️ ' if r['state'] == 'overdue' else ''}🎟 {r['detail']}")
+            continue
+        if r["kind"] == "low_balance":
+            from .cashflow import reminder_text as low_text
+            r["detail"] = low_text(r, zh)
+            lines.append(f"📉 {r['detail']}")
             continue
         if r["kind"] == "reward":
             from .rewards import reminder_text
@@ -474,7 +490,7 @@ def digest(db: Database, days: int = 7, include_overdue: bool = True, lang: str 
                                "currency", "account_name", "account_last4", "expiry", "expiry_label", "pending_names",
                                "card_confirmed", "new_expiry_label", "detail", "reserve_id", "reserve_method", "reserve_end", "reserve_start",
                                "credit_id", "credit_source", "credit_state", "bill_id", "payee",
-                               "reward_id", "reward_balance", "reward_unit", "reward_state", "reward_icon")} for r in items], "today": on.isoformat()}
+                               "reward_id", "reward_balance", "reward_unit", "reward_state", "reward_icon", "threshold", "lowest")} for r in items], "today": on.isoformat()}
 
 
 _TW = (("已于", "已於"), ("将于", "將於"), ("请更新以下定期付款的卡", "請更新以下定期付款的卡"),
