@@ -9,7 +9,8 @@ credit's own account, else the system 'Credits 抵用金' account) and every ste
             account's balance, e.g. its opening balance) | none
   use       an expense from the holding account (created: credit_uses.auto_tx=1), or a link to a transaction already
             recorded on it (a card statement credit offsetting a charge on that card), or paying part of a recorded
-            purchase on any account (split_tx_id): the purchase is reduced and the credit's part is its own expense
+            purchase on any account (split_tx_id): the purchase is reduced and the credit's part is its own expense.
+            Several credits can pay parts of the same purchase; when they cover all of it the purchase stays at 0
   close     what is forfeited comes off the issue transaction (post), else a write-off expense (writeoff_tx_id)
 With `ledger` off a credit is a NOTE, like a card hold: never a transaction, so balances and stats ignore it.
 Fields: account (optional: issuer-only credits), source (refund | cancel | bonus), amount, remaining, currency, issued date, expiry date, issuer /
@@ -436,7 +437,7 @@ def _sync_ledger(con, cid: int, rates) -> None:
         if not u.get("transaction_id") and sp and u.get("split_from_account_id"):  # paid all of a purchase: it moves here again
             _update_tx(con, sp["id"], {"account_id": hold["id"], "currency": c["currency"]}, rates)
             con.execute("UPDATE credit_uses SET transaction_id=?, auto_tx=0 WHERE id=?", (sp["id"], u["id"]))
-        elif not u.get("transaction_id") and sp and u.get("split_amount") and sp["amount"] > u["split_amount"] + EPS:  # split again
+        elif not u.get("transaction_id") and sp and u.get("split_amount") and sp["amount"] + EPS >= u["split_amount"]:  # split again
             _update_tx(con, sp["id"], {"amount": _r2(sp["amount"] - u["split_amount"]), "currency": sp["currency"]}, rates)
             tid = _insert_tx(con, {"kind": "expense", "date": sp["date"], "amount": u["amount"], "currency": c["currency"],
                                    "account_id": hold["id"], "category_id": sp["category_id"], "merchant_id": sp["merchant_id"],
@@ -530,6 +531,8 @@ def use(db: Database, cid: int, body: dict | None = None) -> dict:
     with one, that transaction (on the holding account) is linked instead. {split_tx_id}: a recorded purchase the credit
     paid part of: it is reduced by the amount used and the credit's part is recorded as an expense from the holding
     account with the purchase's category / merchant / member / project (paid all of it: the purchase moves there).
+    Other credits may already have paid parts of it: this one pays (part of) what is left, and if that is all of it the
+    purchase stays where it is at 0 (each credit's part keeps its own expense, so any of them can be undone).
     Using an expired credit is refused unless {force: true} (some merchants honour it anyway)."""
     body = body or {}
     c = get(db, cid, with_uses=False)
@@ -559,10 +562,13 @@ def use(db: Database, cid: int, body: dict | None = None) -> dict:
             raise ValidationError("Choose an expense: the credit pays part of a purchase")
         if sp["currency"] != c["currency"]:
             raise ValidationError(f"That transaction is in {sp['currency']}, the credit in {c['currency']}")
+        if db.one("SELECT id FROM credit_uses WHERE transaction_id=?", (sid,)):
+            raise ValidationError(f"Transaction #{sid} is already paid in full by a credit (or linked to one)")
+        if sp["amount"] < EPS:
+            raise ValidationError(f"Nothing is left to pay on transaction #{sid}")
         if amt > sp["amount"] + EPS:
-            raise ValidationError(f"The credit can pay at most the purchase amount ({sp['amount']:,.2f})")
-        if db.one("SELECT id FROM credit_uses WHERE split_tx_id=? OR transaction_id=?", (sid, sid)):
-            raise ValidationError(f"Transaction #{sid} is already paid in part by a credit")
+            raise ValidationError(f"The credit can pay at most what is left of the purchase ({sp['amount']:,.2f})")
+        shared = bool(db.one("SELECT 1 x FROM credit_uses WHERE split_tx_id=?", (sid,)))  # other credits paid parts of it
         tid = None
     if tid:
         t = db.one("SELECT id, account_id FROM transactions WHERE id=?", (tid,))
@@ -578,14 +584,14 @@ def use(db: Database, cid: int, body: dict | None = None) -> dict:
         auto, split = 0, (None, None, None)
         if sp:
             hold = hold_account(con, c)
-            if amt >= sp["amount"] - EPS:  # the credit paid all of it: the purchase itself moves to the holding account
+            if amt >= sp["amount"] - EPS and not shared:  # the credit paid all of it: the purchase moves to the holding account
                 _update_tx(con, sid, {"account_id": hold["id"], "currency": c["currency"]}, rates)
                 tid, split = sid, (sid, 0, sp["account_id"])
             else:
-                _update_tx(con, sid, {"amount": _r2(sp["amount"] - amt), "currency": c["currency"],
+                _update_tx(con, sid, {"amount": _r2(max(sp["amount"] - amt, 0)), "currency": c["currency"],
                                       "tax_amount": None, "tip_amount": None, "tax_rate": sp["tax_rate"]}
                            if (sp["tax_amount"] or 0) + (sp["tip_amount"] or 0) > sp["amount"] - amt + EPS
-                           else {"amount": _r2(sp["amount"] - amt), "currency": c["currency"]}, rates)
+                           else {"amount": _r2(max(sp["amount"] - amt, 0)), "currency": c["currency"]}, rates)
                 data = {"kind": "expense", "date": sp["date"], "amount": amt, "currency": c["currency"], "account_id": hold["id"],
                         "category_id": sp["category_id"], "merchant_id": sp["merchant_id"], "member_id": sp["member_id"],
                         "project_id": sp["project_id"], "ledger_id": sp["ledger_id"], "tags": sp["tags"],

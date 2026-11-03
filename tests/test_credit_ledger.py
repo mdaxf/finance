@@ -173,3 +173,42 @@ def test_credit_pays_all_of_a_purchase_moves_it(client):
     n = credit(client, account_id=w, source="bonus", amount=10, expiry_date=exp(client), ledger=False)
     r = client.post(f"/api/credits/{n['id']}/use", json={"amount": 5, "split_tx_id": buy["id"]})
     assert r.status_code == 400 and "ledger" in r.json()["detail"]
+
+
+def test_several_credits_pay_parts_of_one_purchase(client):
+    """Two credits (different accounts) pay parts of one card charge; together they can cover all of it, the purchase
+    then stays on the card at 0. Undoing either one puts its part back."""
+    card = mk(client, name="Fake Visa", type="credit_card", currency="USD", opening_balance=0)
+    w1 = mk(client, name="Fake Airline Wallet", type="ewallet", currency="USD", opening_balance=0)
+    w2 = mk(client, name="Fake Travel Wallet", type="ewallet", currency="USD", opening_balance=0)
+    buy = client.post("/api/transactions", json={"kind": "expense", "amount": 300, "account_id": card, "merchant": "Fake Air"}).json()
+    a = credit(client, account_id=w1, source="cancel", amount=100, expiry_date=exp(client))
+    b = credit(client, account_id=w2, source="cancel", amount=500, expiry_date=exp(client))
+    ua = client.post(f"/api/credits/{a['id']}/use", json={"amount": 100, "split_tx_id": buy["id"]})
+    assert ua.status_code == 200, ua.text
+    assert tx(client, buy["id"])["amount"] == 200
+    r = client.post(f"/api/credits/{b['id']}/use", json={"amount": 250, "split_tx_id": buy["id"]})
+    assert r.status_code == 400 and "what is left" in r.json()["detail"]
+    ub = client.post(f"/api/credits/{b['id']}/use", json={"amount": 200, "split_tx_id": buy["id"]})
+    assert ub.status_code == 200, ub.text
+    ub = ub.json()
+    o = tx(client, buy["id"])
+    assert o["amount"] == 0 and o["account_id"] == card                      # stays on the card, nothing left
+    assert sorted(x["id"] for x in o["credits"] if x["role"] == "part") == sorted([a["id"], b["id"]])
+    assert tx(client, ub["uses"][0]["transaction_id"])["account_id"] == w2 and bal(client, card) == 0
+    r = client.post(f"/api/credits/{b['id']}/use", json={"amount": 10, "split_tx_id": buy["id"]})
+    assert r.status_code == 400 and "Nothing is left" in r.json()["detail"]
+    # ledger off and on for the first credit: its part comes back, then is split again
+    client.put(f"/api/credits/{a['id']}", json={"ledger": False})
+    assert tx(client, buy["id"])["amount"] == 100
+    client.put(f"/api/credits/{a['id']}", json={"ledger": True})
+    assert tx(client, buy["id"])["amount"] == 0
+    # undo the first one: its 100 is back on the purchase, the second credit's part is untouched
+    ua = client.get(f"/api/credits/{a['id']}").json()
+    client.delete(f"/api/credits/{a['id']}/uses/{ua['uses'][0]['id']}")
+    assert tx(client, buy["id"])["amount"] == 100 and client.get(f"/api/credits/{b['id']}").json()["remaining"] == 300
+    # a purchase moved whole to a credit's account can't be shared
+    buy2 = client.post("/api/transactions", json={"kind": "expense", "amount": 40, "account_id": card}).json()
+    client.post(f"/api/credits/{b['id']}/use", json={"amount": 40, "split_tx_id": buy2["id"]})
+    r = client.post(f"/api/credits/{a['id']}/use", json={"amount": 10, "split_tx_id": buy2["id"]})
+    assert r.status_code == 400 and "in full" in r.json()["detail"]
