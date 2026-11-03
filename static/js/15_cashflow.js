@@ -46,3 +46,24 @@ function cfAcctFields(a) {
 function cfReminderLine(r) {
   return `<span class="neg">${esc(t('Below {thr} from {date}', {thr: money(r.threshold, r.currency), date: r.due_date}))}</span> · ${esc(t('lowest {low}', {low: money(r.lowest, r.currency)}))}`;
 }
+/* Home: the outlook of every account with a low balance alert, so a coming shortfall is never out of sight */
+function cfSpark(f) {
+  const W = 160, H = 34, ys = f.daily.map(x => x.balance).concat(f.threshold != null ? [f.threshold] : []);
+  const lo = Math.min(...ys), hi = Math.max(...ys), span = hi - lo || 1, n = f.daily.length - 1 || 1;
+  const y = v => (H - 3 - (v - lo) / span * (H - 6)).toFixed(1), x = i => (i / n * W).toFixed(1);
+  const pts = f.daily.map((d, i) => `${x(i)},${y(d.balance)}` + (i < n ? ` ${x(i + 1)},${y(d.balance)}` : '')).join(' ');
+  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" class="cf-spark" aria-hidden="true">
+    ${f.threshold != null ? `<line x1="0" x2="${W}" y1="${y(f.threshold)}" y2="${y(f.threshold)}" stroke="${PALETTE[0]}" stroke-dasharray="4 3" stroke-width="1"/>` : ''}
+    <polyline points="${pts}" fill="none" stroke="${f.below ? PALETTE[0] : PALETTE[1]}" stroke-width="1.8"/></svg>`;
+}
+function cfHome(v, el) {
+  api('/api/forecast/alerts').then(d => {
+    if (!v.isConnected || !d.items.length) return;
+    el.innerHTML = `<div class="card"><div class="row" style="justify-content:space-between"><b>📉 ${t('Balance outlook')}</b><span class="small muted">${esc(t('next {n} days', {n: d.items[0].days}))}</span></div>
+      ${d.items.map(f => `<div class="row cf-home" data-cfh="${f.account_id}" role="button" tabindex="0" title="${esc(t('Open the forecast'))}" style="justify-content:space-between;align-items:center;gap:10px;padding:6px 0;cursor:pointer;flex-wrap:wrap">
+        <span style="min-width:0;flex:1 1 220px"><b>${esc(f.account_name)}</b> ${f.below ? `<span class="pill cx-bad">⚠️ ${esc(t('below {thr} from {date}', {thr: money(f.threshold, f.currency), date: f.first_below.date.slice(5)}))}</span>` : `<span class="pill cx-ok">✓ ${t('OK')}</span>`}
+          <div class="small muted">${esc(t('Now {now} · lowest {low} on {date} · alert below {thr}', {now: money(f.start_balance, f.currency), low: money(f.lowest.balance, f.currency), date: f.lowest.date.slice(5), thr: money(f.threshold, f.currency)}))}</div></span>
+        ${cfSpark(f)}</div>`).join('')}</div>`;
+    $$('[data-cfh]', el).forEach(r => { const open = () => forecastDialog(+r.dataset.cfh, null, () => route()); r.onclick = open; r.onkeydown = e => { if (e.key === 'Enter') open(); }; });
+  }).catch(() => {});
+}

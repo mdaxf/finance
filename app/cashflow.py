@@ -250,6 +250,18 @@ def alert_accounts(db: Database) -> list[dict]:
     return db.all(f"SELECT * FROM accounts WHERE archived=0 AND low_bal_threshold IS NOT NULL AND type IN ({q})", TYPES)
 
 
+def outlook(db: Database, on: date | None = None) -> list[dict]:
+    """Home: the forecast of every account with a low balance alert (daily balances, no event list), lowest first."""
+    on = on or today(db)
+    out = []
+    for a in alert_accounts(db):
+        f = forecast(db, a["id"], on=on)
+        out.append({k: f[k] for k in ("account_id", "account_name", "currency", "as_of", "days", "until", "threshold",
+                                      "start_balance", "end_balance", "lowest", "first_below", "below", "unknown_count", "daily")})
+    out.sort(key=lambda x: (not x["below"], x["lowest"]["balance"] - (x["threshold"] or 0), x["account_name"]))
+    return out
+
+
 def sync_reminders(db: Database, on: date | None = None) -> None:
     on = on or today(db)
     live = set()

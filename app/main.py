@@ -602,6 +602,12 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
         except KeyError:
             raise HTTPException(404, "Account not found")
 
+    @app.get("/api/forecast/alerts")
+    def forecast_alerts():
+        """Home: the balance forecast of every account with a low balance alert ({items}: below first, then by the
+        margin over the threshold)."""
+        return {"items": cashflow.outlook(db)}
+
     @app.get("/api/accounts/{aid}/investment-series")
     def investment_series(aid: int, request: Request):
         """Principal vs returns vs value over time for an investment account.

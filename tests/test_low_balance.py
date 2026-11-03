@@ -139,3 +139,16 @@ def test_forecast_endpoint_and_settings(client, db):
     assert client.put("/api/settings", json={"low_balance_days": "21", "low_balance_bill_account_id": str(a)}).status_code == 200
     assert client.put("/api/accounts/%d" % a, json={"low_bal_days": ""}).status_code == 200
     assert client.get(f"/api/accounts/{a}/forecast").json()["days"] == 21
+
+
+def test_home_outlook_lists_alert_accounts_lowest_margin_first(client, db):
+    a = chk(client, 1000, low_bal_threshold=500)
+    b = mk(client, name="Fake Second", type="savings", currency="USD", opening_balance=3000, start_date="2026-01-01",
+           low_bal_threshold=100)
+    chk(client, 50)                                                        # no alert: not listed
+    sched(client, "Fake Rent", "2026-03-05", {"kind": "expense", "account_id": a, "amount": 700}, freq="once")
+    items = CF.outlook(db, ON)
+    assert [x["account_id"] for x in items] == [a, b]
+    assert items[0]["below"] and items[0]["first_below"]["date"] == "2026-03-05" and len(items[0]["daily"]) == 15
+    assert "events" not in items[0]
+    assert [x["account_id"] for x in client.get("/api/forecast/alerts").json()["items"]] == [a, b]
