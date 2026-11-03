@@ -510,7 +510,9 @@ def normalize_tx(con, data: dict, rates: dict[str, float], existing: dict | None
         if kind == "adjustment":
             if tx["amount"] == 0:
                 raise ValidationError("Adjustment amount cannot be zero")
-        elif tx["amount"] <= 0:
+        elif tx["amount"] <= 0 and not (tx["amount"] == 0 and kind == "expense" and (existing or {}).get("id") and con.execute(
+                "SELECT 1 FROM credit_uses WHERE split_tx_id=?", (existing["id"],)).fetchone()):
+            # 0 is allowed only for a purchase credits paid all of between them (each credit's part is its own expense)
             raise ValidationError("Amount must be greater than zero")
         if kind == "transfer":
             if not tx.get("to_account_id") or tx["to_account_id"] == tx["account_id"]:
