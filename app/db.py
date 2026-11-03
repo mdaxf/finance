@@ -335,6 +335,8 @@ class Database:
                 out.append("credits.ledger")
             if "credit_uses" in tables and "split_tx_id" not in {r[1] for r in con.execute("PRAGMA table_info(credit_uses)")}:
                 out.append("credit_uses.split")
+            if "accounts" in tables and "low_bal_threshold" not in {r[1] for r in con.execute("PRAGMA table_info(accounts)")}:
+                out.append("accounts.low_balance")
             return out
         finally:
             con.close()
@@ -712,6 +714,18 @@ class Database:
                 UPDATE credit_uses SET transaction_id=NULL WHERE transaction_id=OLD.id;
                 UPDATE credits SET issue_tx_id=NULL, issue_auto=0, issue_mode='none' WHERE issue_tx_id=OLD.id;
                 UPDATE credits SET writeoff_tx_id=NULL WHERE writeoff_tx_id=OLD.id; END""")
+            # low balance 余额预警 (additive): a bank account with low_bal_threshold set is forecast low_bal_days (blank =
+            # setting low_balance_days, default 14) ahead; a 'low_balance' reminder (one per account) is open while the
+            # forecast drops below the threshold. A credit card's pay_from_account_id = the bank account its statements
+            # are paid from (counted in that account's forecast).
+            acols = {r[1] for r in con.execute("PRAGMA table_info(accounts)")}
+            for col, ddl in (("low_bal_threshold", "REAL"), ("low_bal_days", "INTEGER"), ("pay_from_account_id", "INTEGER")):
+                if col not in acols:
+                    con.execute(f"ALTER TABLE accounts ADD COLUMN {col} {ddl}")
+            con.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_rem_lowbal ON reminders(account_id) WHERE kind='low_balance'")
+            con.execute("""CREATE TRIGGER IF NOT EXISTS trg_acct_delete_payfrom AFTER DELETE ON accounts BEGIN
+                UPDATE accounts SET pay_from_account_id=NULL WHERE pay_from_account_id=OLD.id;
+                DELETE FROM reminders WHERE kind='low_balance' AND account_id=OLD.id; END""")
             # cursor pagination / account history (additive indexes)
             con.execute("CREATE INDEX IF NOT EXISTS ix_tx_date_id ON transactions(date, id)")
             con.execute("CREATE INDEX IF NOT EXISTS ix_tx_acct_date ON transactions(account_id, date, id)")
