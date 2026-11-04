@@ -133,6 +133,15 @@ def cash_balances(db: Database, until: str | None = None, anchored: bool = True)
     return {k: round(v, 2) + 0.0 for k, v in bal.items()}
 
 
+def cash_balance(db: Database, account_id: int, until: str | None = None) -> float:
+    """One account's cash_balances() value with a few queries (not one per reconciled account)."""
+    cp = latest_checkpoints(db, until, account_id).get(account_id)
+    if cp:
+        return round(cp["cash_balance"] + effects_between(db, account_id, cp["as_of"], until), 2) + 0.0
+    a = db.one("SELECT opening_balance FROM accounts WHERE id=?", (account_id,))
+    return round(((a or {}).get("opening_balance") or 0) + effects_between(db, account_id, None, until), 2) + 0.0
+
+
 def holdings(db: Database, account_id: int | None = None, until: str | None = None) -> list[dict]:
     cond, params = "status='posted' AND kind IN ('buy','sell','dividend') AND ticker IS NOT NULL", []
     if account_id:
