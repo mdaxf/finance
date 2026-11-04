@@ -210,7 +210,7 @@ def forecast(db: Database, aid: int, days: int | None = None, on: date | None = 
     until = on + timedelta(days=days)
     thr = threshold if threshold is not None else acct.get("low_bal_threshold")
     rates = ledger.fx_rates(db)
-    start = ledger.cash_balances(db, until=f"{on.isoformat()} 23:59").get(aid, 0.0)
+    start = ledger.cash_balance(db, aid, until=f"{on.isoformat()} 23:59")
     events: list[dict] = []
     hi = f"{until.isoformat()} 23:59"
     for t in db.all("""SELECT * FROM transactions WHERE (account_id=? OR to_account_id=?) AND date <= ?
