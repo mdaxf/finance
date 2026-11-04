@@ -705,3 +705,69 @@ def backup_copy(db: Database, dest_root: Path, include_external: bool = False) -
                 q.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(p, q); n += 1
     return n
+
+
+# ---------------------------------------------------------------- library (browse saved receipts by date)
+def _lib_where(year: str | None, month: str | None, day: str | None, q: str | None, ledger_id: int | None):
+    """Saved receipts only (linked to a transaction, or kept): filed under the transaction date, else the upload day."""
+    w, a = ["(r.transaction_id IS NOT NULL OR r.kept=1)", "r.rel_path<>''"], []
+    if ledger_id:
+        w.append("t.ledger_id=?"); a.append(int(ledger_id))
+    q = (q or "").strip()
+    if q:
+        like = f"%{q}%"
+        cond = "(m.name LIKE ? OR t.note LIKE ? OR r.orig_name LIKE ? OR r.ocr_text LIKE ? OR a.name LIKE ? OR c.name LIKE ?"
+        a += [like] * 6
+        try:
+            n = abs(float(q.replace(",", "").lstrip("$")))
+            cond += " OR ABS(ABS(COALESCE(t.orig_amount, t.amount)) - ?) < 0.005 OR ABS(ABS(t.amount) - ?) < 0.005"
+            a += [n, n]
+        except ValueError:
+            pass
+        w.append(cond + ")")
+    for part, val, n in (("y", year, 4), ("m", month, 2), ("d", day, 2)):
+        if val:
+            if not str(val).isdigit():
+                raise ReceiptError("Year, month and day are numbers")
+            w.append({"y": "substr(dt,1,4)=?", "m": "substr(dt,6,2)=?", "d": "substr(dt,9,2)=?"}[part])
+            a.append(str(val).zfill(n))
+    return " AND ".join(w), a
+
+
+_LIB_FROM = """FROM (SELECT r.*, COALESCE(substr(t.date,1,10), substr(r.created_at,1,10)) dt FROM receipts r
+    LEFT JOIN transactions t ON t.id=r.transaction_id) r LEFT JOIN transactions t ON t.id=r.transaction_id
+    LEFT JOIN merchants m ON m.id=t.merchant_id LEFT JOIN accounts a ON a.id=t.account_id
+    LEFT JOIN categories c ON c.id=t.category_id"""
+
+
+def library(db: Database, year: str | None = None, month: str | None = None, day: str | None = None,
+            q: str | None = None, ledger_id: int | None = None, limit: int = 300) -> dict:
+    """{tree: [{y, n, months: [{m, n, days: [{d, n}]}]}] (the search applies, the date does not), items (newest first,
+    the chosen year / month / day), total, truncated}."""
+    limit = max(1, min(int(limit or 300), 1000))
+    tw, ta = _lib_where(None, None, None, q, ledger_id)
+    tree: list[dict] = []
+    for r in db.all(f"SELECT r.dt, COUNT(*) n {_LIB_FROM} WHERE {tw} GROUP BY r.dt ORDER BY r.dt DESC", ta):
+        y, m, d = r["dt"][:4], r["dt"][5:7], r["dt"][8:10]
+        if not tree or tree[-1]["y"] != y:
+            tree.append({"y": y, "n": 0, "months": []})
+        ms = tree[-1]["months"]
+        if not ms or ms[-1]["m"] != m:
+            ms.append({"m": m, "n": 0, "days": []})
+        ms[-1]["days"].append({"d": d, "n": r["n"]})
+        ms[-1]["n"] += r["n"]
+        tree[-1]["n"] += r["n"]
+    w, a = _lib_where(year, month, day, q, ledger_id)
+    total = db.one(f"SELECT COUNT(*) n {_LIB_FROM} WHERE {w}", a)["n"]
+    rows = db.all(f"""SELECT r.id, r.transaction_id, r.orig_name, r.size, r.mime, r.created_at, r.rel_path, r.dt date,
+        t.date tx_date, t.kind, t.status, t.amount, t.currency, t.orig_amount, t.orig_currency, t.note,
+        m.name merchant, a.name account_name, c.name category_name {_LIB_FROM} WHERE {w}
+        ORDER BY r.dt DESC, t.date DESC, r.id DESC LIMIT ?""", a + [limit])
+    items = []
+    for r in rows:
+        r = dict(r)
+        r["url"] = f"/api/receipts/{r['id']}/image"
+        r["thumb_url"] = f"/api/receipts/{r['id']}/image?thumb=1"
+        r["file_name"] = r.pop("rel_path").rsplit("/", 1)[-1]
+        items.append(r)
+    return {"tree": tree, "items": items, "total": total, "truncated": total > len(items)}

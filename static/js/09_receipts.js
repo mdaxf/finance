@@ -71,7 +71,7 @@ async function receiptCapture(files) {
   openTx(null, null, rcPreset(res), {receipt_ids: res.receipt_ids, receipts: res.receipts, uncertain: res.uncertain, raw_text: res.ocr_text,
     banner: `🧾 From receipt (${res.ocr && res.ocr.available ? conf + '% sure' : 'no OCR: fill in by hand'}). Check and press Save; nothing is recorded until then.`});
 }
-const rcThumbsHtml = list => (list || []).map(r => `<a class="rc-thumb" href="${r.url}" target="_blank" title="Open full image"><img src="${r.thumb_url}" alt="receipt" loading="lazy"></a>`).join('');
+const rcThumbsHtml = list => (list || []).map(r => `<a class="rc-thumb" href="${r.url}" target="_blank" data-rcv="${r.id}" title="Preview the photo"><img src="${r.thumb_url}" alt="receipt" loading="lazy"></a>`).join('');
 /* drag & drop a photo onto the quick-add bar (desktop) */
 (fn => document.readyState === 'loading' ? document.addEventListener('DOMContentLoaded', fn) : fn())(() => {
   const qa = $('#qaForm'); if (!qa) return;

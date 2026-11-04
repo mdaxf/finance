@@ -1284,6 +1284,14 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
                 "pattern": db.get_setting("receipts_pattern") or receipts.DEFAULT_PATTERN,
                 "max_mb": receipts.MAX_BYTES // 1024 // 1024, "max_files": receipts.MAX_FILES}
 
+    @app.get("/api/receipts/library")
+    def receipts_library(year: str | None = None, month: str | None = None, day: str | None = None, q: str | None = None,
+                         ledger_id: int | None = None, limit: int = 300):
+        try:
+            return receipts.library(db, year, month, day, q, ledger_id, limit)
+        except receipts.ReceiptError as e:
+            raise HTTPException(400, str(e))
+
     def _rc_err(code: int, msg: str):
         log.warning("receipt upload rejected (%s): %s", code, msg)
         return JSONResponse({"ok": False, "detail": msg, "message": "Receipt not saved: " + msg}, status_code=code)
@@ -1409,7 +1417,9 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
             raise HTTPException(404, "Receipt file missing (receipts folder moved?)")
         if thumb:
             return Response(receipts.thumbnail(p), media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
-        return FileResponse(p, media_type=r["mime"] or "image/jpeg", filename=p.name)
+        # inline: the browser shows the photo (preview) instead of saving it; the file name is kept for "Save as"
+        return FileResponse(p, media_type=r["mime"] or "image/jpeg", filename=p.name, content_disposition_type="inline",
+                            headers={"Cache-Control": "private, max-age=3600"})
 
     @app.post("/api/receipts/{rid}/link")
     def receipt_link(rid: int, body: dict = Body(...)):
