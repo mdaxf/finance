@@ -380,6 +380,7 @@ async function openTx(id, after, preset = {}, opts = {}) {
         form.amount.focus();
       } else {
         bg.close(); toast(approve ? 'Approved ✓' : 'Saved');
+        if (res && res.email_twins && res.email_twins.length) toast(t('The email monitor had recorded the same charge (#{ids}): moved to To review, delete it there', {ids: res.email_twins.join(', #')}), false, 7000);
         // a new reimbursement: offer to link it to the open reimbursable expenses it pays back
         if (isNew && kind === 'reimbursement' && res && res.status === 'posted') {
           const sg = await api('/api/reimbursements/suggest?reimbursement_id=' + res.id + '&limit=1').catch(() => null);

@@ -586,7 +586,58 @@ def create_tx(db: Database, data: dict) -> dict:
         cur = con.execute(f"INSERT INTO transactions({','.join(cols)}) VALUES({','.join('?' * len(cols))})",
                           [tx[k] for k in cols])
         tid = cur.lastrowid
-    return get_tx(db, tid)
+    out = get_tx(db, tid)
+    twins = email_twins_to_review(db, out)
+    if twins:
+        out["email_twins"] = twins
+    return out
+
+
+# ---------------------------------------------------------------- the same charge recorded twice (email alert + you)
+TWIN_SOURCES = ("web", "api", "agent", "receipt", "bot", "scheduled")  # entered by you or your schedules
+
+
+def same_day_twins(db: Database, kind: str, amount, currency: str | None, account_id, to_account_id, date_s: str | None,
+                   exclude_id: int | None = None, source: str | None = None) -> list[dict]:
+    """Transactions with the same amount (±0.01) and currency on the same account (either side) the same calendar day,
+    any merchant: an email alert and a receipt / form entry for one purchase. Closest in time first."""
+    accts = [a for a in (account_id, to_account_id) if a]
+    if not amount or not accts:
+        return []
+    day = (str(date_s or "") or now_iso())[:10]
+    ph = ",".join("?" * len(accts))
+    rows = db.all(f"""SELECT t.id, t.date, t.amount, t.currency, t.kind, t.status, t.source, t.created_at, t.updated_at,
+        t.confidence, m.name merchant_name, t.note FROM transactions t LEFT JOIN merchants m ON m.id=t.merchant_id
+        WHERE substr(t.date,1,10)=? AND abs(abs(t.amount)-?) < 0.006 AND (t.account_id IN ({ph}) OR t.to_account_id IN ({ph}))
+          AND t.id<>?{' AND t.source=?' if source else ''}""",
+                  [day, abs(float(amount)), *accts, *accts, exclude_id or 0] + ([source] if source else []))
+    out = [r for r in rows if not (currency and r["currency"] and r["currency"].upper() != currency.upper())
+           and (r["kind"] == kind or "transfer" in (r["kind"], kind))]
+    when = str(date_s or "")[:16]
+    return sorted(out, key=lambda r: abs(_mins(r["date"]) - _mins(when)) if len(when) >= 16 else 0)
+
+
+def _mins(s: str) -> int:
+    try:
+        d = datetime.strptime(s[:16].replace("T", " "), "%Y-%m-%d %H:%M")
+        return d.hour * 60 + d.minute
+    except ValueError:
+        return 12 * 60
+
+
+def email_twins_to_review(db: Database, tx: dict) -> list[int]:
+    """You recorded a charge (receipt, form, Shortcut, schedule) that the email monitor had already recorded the same
+    day: its copy goes to To review (nothing is deleted). Only email transactions you haven't approved or edited."""
+    if tx.get("source") not in TWIN_SOURCES or tx.get("status") != "posted":
+        return []
+    ids = [r["id"] for r in same_day_twins(db, tx["kind"], tx["amount"], tx.get("currency"), tx.get("account_id"),
+                                           tx.get("to_account_id"), tx.get("date"), tx["id"], source="email")
+           if r["status"] == "review" or (r["updated_at"] or "") <= (r["created_at"] or "")]
+    if ids:
+        with db.tx() as con:
+            con.execute(f"""UPDATE transactions SET status='review', confidence=MIN(COALESCE(confidence,1),0.3)
+                            WHERE id IN ({','.join('?' * len(ids))})""", ids)
+    return ids
 
 
 def update_tx(db: Database, tid: int, data: dict) -> dict:

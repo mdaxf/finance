@@ -158,12 +158,13 @@ function mailboxForm(m) {
    <label class="f"><span>Look back (days) on each poll</span><input name="lookback_days" type="number" min="1" value="${m.lookback_days || 7}"></label>
    <label class="chk"><input type="checkbox" name="enabled" ${m.enabled ? 'checked' : ''}> Enabled</label>
    <label class="chk"><input type="checkbox" name="auto_post" ${m.auto_post ? 'checked' : ''}> Auto-post high-confidence results (otherwise everything goes to review)</label>
+   <label class="chk full"><input type="checkbox" name="dup_same_day" ${m.dup_same_day ?? 1 ? 'checked' : ''}> ${t('Same amount, account and day as a transaction already recorded (any merchant) → To review as a possible duplicate')}</label>
    <label class="chk full"><input type="checkbox" name="watch_rules" ${m.watch_rules ? 'checked' : ''}> Also watch for bills and rule actions: take emails outside the sender / subject filter above when a bill, schedule, loan, credit or miles & points rule matches them, or when the subject reads like a bill or a payment confirmation (those only ever become bills, never transactions)</label>
    <div class="full small" id="mtest"></div></form>`, {wide: true, buttons: `<button class="btn" data-t>Test connection</button><span class="sp"></span><button class="btn" data-x3>Cancel</button><button class="btn pri" data-ok>Save</button>`});
   const f = $('#mf', bg);
   const smShow = () => $$('[data-sm]', bg).forEach(x => { x.hidden = x.dataset.sm !== f.schedule_mode.value; });
   f.schedule_mode.onchange = smShow; smShow();
-  const collect = () => { const o = Object.fromEntries(new FormData(f)); ['use_ssl', 'enabled', 'auto_post', 'watch_rules'].forEach(k => o[k] = f[k].checked ? 1 : 0); if (!o.password) delete o.password;
+  const collect = () => { const o = Object.fromEntries(new FormData(f)); ['use_ssl', 'enabled', 'auto_post', 'watch_rules', 'dup_same_day'].forEach(k => o[k] = f[k].checked ? 1 : 0); if (!o.password) delete o.password;
     o.schedule_weekdays = $$('[data-wd]', bg).filter(c => c.checked).map(c => c.dataset.wd).join(','); return o; };
   $('[data-x3]', bg).onclick = bg.close;
   $('[data-t]', bg).onclick = async () => { $('#mtest', bg).textContent = 'Testing…'; const o = collect(); if (!isNew) o.id = m.id;

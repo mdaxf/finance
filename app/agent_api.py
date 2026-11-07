@@ -254,6 +254,8 @@ def create(db: Database, body: dict, files: list[tuple[bytes, str]] | None = Non
             if b.get("tax_rate") not in (None, ""):
                 tx["tax_rate"] = _num(str(b["tax_rate"]).rstrip("%"), "tax_rate")
         t = ledger.create_tx(db, tx)
+        for x in t.get("email_twins") or []:
+            warnings.append(f"the email monitor had recorded the same charge (#{x}): moved to To review, delete it there")
     except (AgentError, ledger.ValidationError):
         for r in saved:
             receipts.delete(db, r["id"])
