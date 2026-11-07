@@ -804,6 +804,12 @@ def ingest_email(db: Database, msg: dict, mailbox: dict | None = None, auto_post
         conf = min(conf, 0.3)
         status = "review"
         reasons.append(f"possible duplicate of #{sim['id']} ({sim['why']})")
+    elif (mailbox or {}).get("dup_same_day", 1):  # the mailbox switch (on by default; API / forwarded emails: on)
+        tw = ledger.same_day_twins(db, kind, ex["amount"], ex.get("currency"), account_id, to_account_id, date_s)
+        if tw:
+            conf = min(conf, 0.3)
+            status = "review"
+            reasons.append(f"possible duplicate of #{tw[0]['id']} (same amount, account and day)")
     data = {"kind": kind, "date": date_s, "amount": ex["amount"], "currency": ex.get("currency"),
             "account_id": account_id, "to_account_id": to_account_id, "category_id": cat_id,
             "merchant": ex.get("merchant"), "note": f"{subject}".strip()[:200], "source": source,

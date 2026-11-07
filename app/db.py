@@ -327,6 +327,8 @@ class Database:
                 out.append("email_rules.actions")
             if "mailboxes" in tables and "watch_rules" not in {r[1] for r in con.execute("PRAGMA table_info(mailboxes)")}:
                 out.append("mailboxes.watch_rules")
+            if "mailboxes" in tables and "dup_same_day" not in {r[1] for r in con.execute("PRAGMA table_info(mailboxes)")}:
+                out.append("mailboxes.dup_same_day")
             if "ingest_log" in tables and "ref_kind" not in {r[1] for r in con.execute("PRAGMA table_info(ingest_log)")}:
                 out.append("ingest_log.ref")
             if "as_expense" not in {r[1] for r in con.execute("PRAGMA table_info(transactions)")}:
@@ -660,6 +662,9 @@ class Database:
             # mailbox: also take emails a rule above targets (or that look like a bill) outside its sender/subject filter
             if "watch_rules" not in {r[1] for r in con.execute("PRAGMA table_info(mailboxes)")}:
                 con.execute("ALTER TABLE mailboxes ADD COLUMN watch_rules INTEGER DEFAULT 0")
+            # mailbox: an email charge with the same amount, account and day as an existing transaction -> To review
+            if "dup_same_day" not in {r[1] for r in con.execute("PRAGMA table_info(mailboxes)")}:
+                con.execute("ALTER TABLE mailboxes ADD COLUMN dup_same_day INTEGER DEFAULT 1")
             # ingest log: what the email became when it is not a transaction (bill / schedule / loan / credit / reward)
             lcols = {r[1] for r in con.execute("PRAGMA table_info(ingest_log)")}
             for col, ddl in (("ref_kind", "TEXT"), ("ref_id", "INTEGER")):

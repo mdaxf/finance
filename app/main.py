@@ -1445,6 +1445,9 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
         except KeyError:
             raise HTTPException(404)
         receipts.relocate_for_tx(db, tid)
+        tw = ledger.email_twins_to_review(db, t)  # approving your entry: the email monitor's copy goes to To review
+        if tw:
+            t["email_twins"] = tw
         return t
 
     @app.post("/api/transactions/{tid}/attachment")
@@ -1538,6 +1541,11 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
     @app.get("/api/review")
     def review_items():
         rows, total = ledger.query_tx(db, {"status": "review", "limit": 500})
+        for t in rows:  # the same amount on the same account that day: maybe recorded twice (email + receipt / form)
+            tw = ledger.same_day_twins(db, t["kind"], t["amount"], t.get("currency"), t.get("account_id"),
+                                       t.get("to_account_id"), t["date"], t["id"])
+            if tw:
+                t["dup_of"] = {k: tw[0][k] for k in ("id", "date", "source", "status", "merchant_name", "note")}
         holds = reserves.list_reserves(db, {"review": "1", "state": "all"})["items"]
         return {"items": rows, "total": total, "holds": holds}
 
@@ -2096,7 +2104,8 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
     # ------------------------------------------------------------ email monitoring
     MB_FIELDS = ["name", "host", "port", "use_ssl", "username", "folder", "interval_minutes", "enabled",
                  "sender_allowlist", "subject_keywords", "after_action", "move_folder", "default_account_id",
-                 "auto_post", "lookback_days", "schedule_mode", "schedule_times", "schedule_weekdays", "watch_rules"]
+                 "auto_post", "lookback_days", "schedule_mode", "schedule_times", "schedule_weekdays", "watch_rules",
+                 "dup_same_day"]
 
     def _mb_public(m: dict) -> dict:
         from . import mail_schedule as ms
@@ -2115,7 +2124,7 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
         for k in ("port", "interval_minutes", "lookback_days"):
             if k in d:
                 d[k] = int(d[k] or 0) or None
-        for k in ("use_ssl", "enabled", "auto_post", "watch_rules"):
+        for k in ("use_ssl", "enabled", "auto_post", "watch_rules", "dup_same_day"):
             if k in d:
                 d[k] = 1 if d[k] in (True, 1, "1", "true", "on") else 0
         if "after_action" in d and d["after_action"] not in ("none", "mark_read", "move"):

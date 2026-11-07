@@ -46,8 +46,8 @@ def test_no_merchant_in_email_is_review_not_skip(client, accounts):
 
 def test_different_merchant_amount_or_day_is_not_similar(client, accounts):
     setup(client, accounts)
-    for i, (body, when) in enumerate([("You spent $23.45 at Fake Cinema on your Chase Sapphire.", "2099-04-10 12:05"),
-                                      ("You spent $50.00 at Fake Bistro on your Chase Sapphire.", "2099-04-10 12:05"),
+    # (a different merchant with the same amount the same day: see test_email_twins.py, the mailbox's same-day check)
+    for i, (body, when) in enumerate([("You spent $50.00 at Fake Bistro on your Chase Sapphire.", "2099-04-10 12:05"),
                                       ("You spent $23.45 at Fake Bistro on your Chase Sapphire.", "2099-04-11 12:05")]):
         r = mail(client, body, when, 10 + i)
         assert r["created"] and not any("possible duplicate" in x for x in r["reasons"]), (body, when, r["reasons"])
