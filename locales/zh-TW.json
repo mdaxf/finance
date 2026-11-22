@@ -1439,5 +1439,7 @@
  "🔁 The email is this scheduled item happening (e.g. a paycheck alert): the occurrence nearest the email date is posted with the email's amount and marked done, so it is never posted twice. Already posted: nothing new.": "🔁 這封郵件表示該週期項目已發生（如工資到賬提醒）：離郵件日期最近的一期按郵件金額入賬並標記完成，不會重複入賬。已入賬：不做任何事。",
  "🗓 A future charge (autopay scheduled, subscription renews …): a one-time scheduled item on that date with a reminder; nothing is posted until it happens.": "🗓 未來的扣款（自動扣款已安排、訂閱續費……）：在該日期生成一次性週期項目並提醒；發生前不入賬。",
  "🤝 A loan payment: recorded on the loan in Loan Center, split into principal / interest / escrow (blank amount = the expected payment). A loan with its own schedule posts that installment.": "🤝 借貸還款：記錄到借貸中心的該筆借貸，拆分為本金 / 利息 / 託管（金額留空 = 應還金額）。有自己週期計劃的借貸會入賬對應那一期。",
- "🧾 A bill or payment request: it becomes a payment task in Bills with a reminder before the due date. No transaction is recorded.": "🧾 賬單或付款請求：在“賬單待付”中生成付款任務，並在到期前提醒。不記錄交易。"
+ "🧾 A bill or payment request: it becomes a payment task in Bills with a reminder before the due date. No transaction is recorded.": "🧾 賬單或付款請求：在“賬單待付”中生成付款任務，並在到期前提醒。不記錄交易。",
+ "Transaction type": "交易類型",
+ "A reimbursable expense leaves the account now and is tracked in Reimbursements; it is not counted as spending while it is open.": "可報銷支出會先從賬戶扣款並記入報銷中心；在結清前不計入支出。"
 }

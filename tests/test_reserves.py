@@ -504,3 +504,106 @@ def test_posted_expense_converts_to_deposit_in_place(client):
     assert client.post(f"/api/transactions/{t['id']}/to-reserve", json={"method": "deposit"}).status_code == 400
     inc = tx(client, kind="income", account_id=a["chk"], amount=50)
     assert client.post(f"/api/transactions/{inc['id']}/to-reserve", json={"method": "hold"}).status_code == 400
+
+
+# 14 — checkout transaction type: expense (default) or reimbursable
+def _final_tx(c, rid):
+    r = c.get(f"/api/reserves/{rid}").json()
+    links = [l for l in r["links"] if l["role"] == "charge" and l.get("final")] or [l for l in r["links"] if l["role"] == "charge"]
+    assert links, r
+    return c.get(f"/api/transactions/{links[0]['transaction_id']}").json()
+
+
+def test_checkout_default_is_expense_and_counts(client):
+    a = setup(client)
+    s0 = stats(client)
+    h = res(client, method="hold", account_id=a["card"], amount=300, title="Hotel hold")
+    out = settle(client, h["id"], final={"amount": 280})
+    assert out["plan"][0]["kind"] == "expense" and not out["plan"][0].get("reimbursable")
+    t = _final_tx(client, h["id"])
+    assert t["kind"] == "expense" and not t["reimbursable"]
+    s1 = stats(client)
+    assert s1["month_exp"] == s0["month_exp"] + 280
+    # type can be switched to reimbursable afterwards via the normal edit
+    assert client.put(f"/api/transactions/{t['id']}", json={"reimbursable": True, "reimb_payer": "Acme"}).status_code == 200
+    t2 = client.get(f"/api/transactions/{t['id']}").json()
+    assert t2["reimbursable"] == 1 and t2["reimb_payer"] == "Acme" and t2["kind"] == "expense"
+    s2 = stats(client)
+    assert s2["month_exp"] == s0["month_exp"]  # open reimbursable expense is not spending
+    # and back
+    assert client.put(f"/api/transactions/{t['id']}", json={"reimbursable": False}).status_code == 200
+    assert stats(client)["month_exp"] == s0["month_exp"] + 280
+
+
+def test_checkout_reimbursable_final_bill(client):
+    a = setup(client)
+    s0 = stats(client)
+    card0 = bal(client, a["card"])
+    h = res(client, method="hold", account_id=a["card"], amount=400, title="Biz trip")
+    out = settle(client, h["id"], final={"amount": 350, "kind": "reimbursable", "reimb_payer": "Acme Corp"})
+    assert out["reserve"]["state"] == "settled" and out["plan"][0]["reimbursable"] is True
+    t = _final_tx(client, h["id"])
+    assert t["kind"] == "expense" and t["reimbursable"] == 1 and t["reimb_payer"] == "Acme Corp"
+    # card is charged the same way as a normal expense (credit card balance goes more negative)
+    assert bal(client, a["card"]) == card0 - 350
+    assert stats(client)["month_exp"] == s0["month_exp"]  # not counted while open
+    items = client.get("/api/reimbursements?status=open").json()["items"]
+    assert any(i["id"] == t["id"] and i["reimb_outstanding"] == 350 for i in items)
+    # kind=reimbursement is accepted as the same flag (a checkout charge is still an outflow)
+    h2 = res(client, method="hold", account_id=a["card"], amount=80)
+    t2 = _final_tx(client, settle(client, h2["id"], final={"amount": 80, "kind": "reimbursement", "reimb_payer": "HR"})["reserve"]["id"])
+    assert t2["kind"] == "expense" and t2["reimbursable"] == 1 and t2["reimb_payer"] == "HR"
+    # also reimbursable=true with kind omitted
+    h3 = res(client, method="hold", account_id=a["card"], amount=40)
+    t3 = _final_tx(client, settle(client, h3["id"], final={"amount": 40, "reimbursable": True})["reserve"]["id"])
+    assert t3["kind"] == "expense" and t3["reimbursable"] == 1
+
+
+def test_checkout_rejects_inflow_kinds_and_skips_type_on_release_or_link(client):
+    a = setup(client)
+    h = res(client, method="hold", account_id=a["card"], amount=100)
+    bad = client.post(f"/api/reserves/{h['id']}/settle", json={"final": {"amount": 90, "kind": "income"}})
+    assert bad.status_code == 400 and "reimbursable" in bad.json()["detail"].lower()
+    for k in ("refund", "transfer", "adjustment"):
+        assert client.post(f"/api/reserves/{h['id']}/settle", json={"final": {"amount": 90, "kind": k}}).status_code == 400
+    # release: no transaction, even if a type is sent somehow (release path ignores final)
+    rel = res(client, method="hold", account_id=a["card"], amount=50, title="Released")
+    out = settle(client, rel["id"], release=True)
+    assert out["reserve"]["state"] == "released" and out["reserve"]["link_count"] == 0
+    # linking an existing expense leaves its type alone
+    e = tx(client, kind="expense", account_id=a["card"], amount=60, note="already posted")
+    h2 = res(client, method="hold", account_id=a["card"], amount=60)
+    settle(client, h2["id"], final={"transaction_id": e["id"], "kind": "reimbursable"})
+    g = client.get(f"/api/transactions/{e['id']}").json()
+    assert g["kind"] == "expense" and not g["reimbursable"]
+
+
+def test_deposit_checkout_type_per_part_and_partial(client):
+    a = setup(client)
+    s0 = stats(client)
+    d = res(client, method="deposit", account_id=a["chk"], amount=500, title="Rental deposit")
+    # partial: apply 100 as reimbursable, leave the rest outstanding
+    out = settle(client, d["id"], apply={"amount": 100, "kind": "reimbursable", "reimb_payer": "Landlord's insurance"})
+    x = out["reserve"]
+    assert x["state"] == "partial" and x["applied"] == 100 and x["outstanding"] == 400
+    apply_tx = client.get(f"/api/transactions/{[l for l in x['links'] if l['role']=='apply'][0]['transaction_id']}").json()
+    assert apply_tx["kind"] == "expense" and apply_tx["reimbursable"] == 1
+    assert stats(client)["month_exp"] == s0["month_exp"]  # reimbursable apply is not spending yet
+    # finish: keep 50 as a normal expense, refund the rest (refund stays a transfer)
+    out = settle(client, d["id"], forfeit={"amount": 50, "kind": "expense", "note": "cleaning"},
+                 charge={"amount": 25, "account_id": a["card"], "kind": "reimbursable", "reimb_payer": "Acme"},
+                 refund={"account_id": a["chk"]})
+    x = out["reserve"]
+    assert x["state"] == "settled" and x["forfeited"] == 50 and x["refunded"] == 350 and x["charges"] == 25
+    kinds = {l["role"]: client.get(f"/api/transactions/{l['transaction_id']}").json() for l in x["links"]}
+    assert kinds["deposit"]["kind"] == "transfer"
+    assert kinds["refund"]["kind"] == "transfer" and not kinds["refund"].get("reimbursable")
+    assert kinds["forfeit"]["kind"] == "expense" and not kinds["forfeit"]["reimbursable"]
+    assert kinds["charge"]["kind"] == "expense" and kinds["charge"]["reimbursable"] == 1 and kinds["charge"]["reimb_payer"] == "Acme"
+    s1 = stats(client)
+    assert s1["month_exp"] == s0["month_exp"] + 50  # only the kept (non-reimbursable) part
+    # dry-run preview includes the flag
+    d2 = res(client, method="deposit", account_id=a["chk"], amount=200)
+    prev = settle(client, d2["id"], dry_run=True, apply={"amount": 200, "reimbursable": True})
+    assert prev["dry_run"] and prev["plan"][0]["reimbursable"] is True and prev["result"]["outstanding"] == 0
+    assert client.get(f"/api/reserves/{d2['id']}").json()["outstanding"] == 200  # dry run saved nothing

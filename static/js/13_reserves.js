@@ -194,6 +194,9 @@ async function reserveCheckout(id, after) {
       <label class="f" data-mode="bill"><span>${t('Final bill amount')} (${esc(cur)})</span><input name="bill" type="number" step="0.01" min="0.01" inputmode="decimal" value="${x.amount}"></label>
       <label class="f" data-mode="bill"><span>${t('Paid with')}</span><select name="bill_acct">${acctOptions(x.account_id, {filter: a => !a.archived && a.system_role !== 'deposits'})}</select></label>
       <label class="f" data-mode="bill"><span>${t('Category')}</span><select name="bill_cat">${catOptions('expense', x.category_id)}</select></label>
+      <label class="f" data-mode="bill"><span>${t('Transaction type')}</span><select name="bill_type">${[['expense', t('Expense')], ['reimbursable', t('Reimbursable')]].map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></label>
+      <label class="f" data-mode="bill" data-payer="bill" hidden><span>${t('Paid back by (company / person)')}</span><input name="bill_payer" list="dlPayer" placeholder="${t('optional')}"></label>
+      <div class="full small muted" data-mode="bill" data-payer="bill" hidden>${t('A reimbursable expense leaves the account now and is tracked in Reimbursements; it is not counted as spending while it is open.')}</div>
       ${charges.length ? `<label class="f full" data-mode="link" hidden><span>${t('Charge')}</span><select name="tx">${charges.map(s => `<option value="${s.id}">${esc(s.date.slice(0, 10))} · ${money(s.amount, s.currency)} · ${esc(s.merchant_name || s.note || s.account_name || '')}</option>`).join('')}</select></label>` : ''}
       <label class="f"><span>${t('Date')}</span><input name="date" type="date" value="${esc(x.end_date && x.end_date <= today() ? x.end_date : today())}"></label>`
     : `<div class="full small muted">${esc(t('{amt} outstanding. Split it into what came back, what was applied to the bill and what the merchant kept.', {amt: money(x.outstanding, cur)}))}</div>
@@ -202,9 +205,15 @@ async function reserveCheckout(id, after) {
         <label class="f"><span>${t('Deposit returned')} (${esc(cur)}) <small class="muted">${t('(blank = the rest)')}</small></span><input name="rf_amt" type="number" step="0.01" min="0" inputmode="decimal"></label>
         <label class="f" id="rsRecv" hidden><span>${t('Amount that arrived')} <small class="muted" id="rsRecvCur"></small></span><input name="rf_recv" type="number" step="0.01" min="0" inputmode="decimal" placeholder="${t('optional: a different rate posts an FX adjustment')}"></label>
         <label class="chk"><input type="checkbox" name="rf_on" checked> ${t('Record the refund')}</label></fieldset>
-      <fieldset class="full rs-co-box"><legend>🧾 ${t('Applied to the bill')}</legend><label class="f"><span>${t('Amount')} (${esc(cur)})</span><input name="ap_amt" type="number" step="0.01" min="0" inputmode="decimal"></label></fieldset>
-      <fieldset class="full rs-co-box"><legend>✂️ ${t('Kept by the merchant')}</legend><label class="f"><span>${t('Amount')} (${esc(cur)})</span><input name="fo_amt" type="number" step="0.01" min="0" inputmode="decimal"></label><label class="f"><span>${t('Why it was kept')}</span><input name="fo_note" placeholder="${t('e.g. damage, cleaning fee')}"></label></fieldset>
-      <fieldset class="full rs-co-box"><legend>➕ ${t('Extra charge on the card')}</legend><label class="f"><span>${t('Amount')}</span><input name="ch_amt" type="number" step="0.01" min="0" inputmode="decimal"></label><label class="f"><span>${t('Paid with')}</span><select name="ch_acct">${acctOptions(x.account_id, {filter: a => !a.archived && a.id !== x.deposit_account_id})}</select></label></fieldset>
+      <fieldset class="full rs-co-box"><legend>🧾 ${t('Applied to the bill')}</legend><label class="f"><span>${t('Amount')} (${esc(cur)})</span><input name="ap_amt" type="number" step="0.01" min="0" inputmode="decimal"></label>
+        <label class="f"><span>${t('Transaction type')}</span><select name="ap_type">${[['expense', t('Expense')], ['reimbursable', t('Reimbursable')]].map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></label>
+        <label class="f" data-payer="ap" hidden><span>${t('Paid back by (company / person)')}</span><input name="ap_payer" list="dlPayer" placeholder="${t('optional')}"></label></fieldset>
+      <fieldset class="full rs-co-box"><legend>✂️ ${t('Kept by the merchant')}</legend><label class="f"><span>${t('Amount')} (${esc(cur)})</span><input name="fo_amt" type="number" step="0.01" min="0" inputmode="decimal"></label><label class="f"><span>${t('Why it was kept')}</span><input name="fo_note" placeholder="${t('e.g. damage, cleaning fee')}"></label>
+        <label class="f"><span>${t('Transaction type')}</span><select name="fo_type">${[['expense', t('Expense')], ['reimbursable', t('Reimbursable')]].map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></label>
+        <label class="f" data-payer="fo" hidden><span>${t('Paid back by (company / person)')}</span><input name="fo_payer" list="dlPayer" placeholder="${t('optional')}"></label></fieldset>
+      <fieldset class="full rs-co-box"><legend>➕ ${t('Extra charge on the card')}</legend><label class="f"><span>${t('Amount')}</span><input name="ch_amt" type="number" step="0.01" min="0" inputmode="decimal"></label><label class="f"><span>${t('Paid with')}</span><select name="ch_acct">${acctOptions(x.account_id, {filter: a => !a.archived && a.id !== x.deposit_account_id})}</select></label>
+        <label class="f"><span>${t('Transaction type')}</span><select name="ch_type">${[['expense', t('Expense')], ['reimbursable', t('Reimbursable')]].map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></label>
+        <label class="f" data-payer="ch" hidden><span>${t('Paid back by (company / person)')}</span><input name="ch_payer" list="dlPayer" placeholder="${t('optional')}"></label></fieldset>
       <label class="f"><span>${t('Category')}</span><select name="cat">${catOptions('expense', x.category_id)}</select></label>
       <label class="f"><span>${t('Date')}</span><input name="date" type="date" value="${esc(today())}"></label>`;
   const bg = modal(`🧳 ${t('Check out')} · ${esc(x.label)}`, `<form class="form" id="rsCo" autocomplete="off">${body}</form><div class="rs-prev" id="rsPrev"></div>`,
@@ -216,14 +225,15 @@ async function reserveCheckout(id, after) {
       const mode = (f.querySelector('[name=mode]:checked') || {}).value;
       if (mode === 'release') b.release = true;
       else if (mode === 'link') b.final = {transaction_id: +f.tx.value};
-      else b.final = {amount: f.bill.value, account_id: +f.bill_acct.value, category_id: f.bill_cat.value || null, date: f.date.value};
+      else { b.final = {amount: f.bill.value, account_id: +f.bill_acct.value, category_id: f.bill_cat.value || null, date: f.date.value, kind: f.bill_type.value || 'expense'}; if (f.bill_type.value === 'reimbursable' && f.bill_payer.value) b.final.reimb_payer = f.bill_payer.value; }
       return b;
     }
     const cat = f.cat.value || null;
     if (f.rf_on.checked) { b.refund = {account_id: +f.rf_acct.value, date: f.date.value}; if (f.rf_amt.value) b.refund.amount = f.rf_amt.value; if (!$('#rsRecv', bg).hidden && f.rf_recv.value) b.refund.received = f.rf_recv.value; }
-    if (+f.ap_amt.value) b.apply = {amount: f.ap_amt.value, category_id: cat};
-    if (+f.fo_amt.value) b.forfeit = {amount: f.fo_amt.value, category_id: cat, note: f.fo_note.value || undefined};
-    if (+f.ch_amt.value) b.charge = {amount: f.ch_amt.value, account_id: +f.ch_acct.value, category_id: cat};
+    const typ = (name, payer) => { const o = {kind: f[name].value || 'expense'}; if (o.kind === 'reimbursable' && f[payer].value) o.reimb_payer = f[payer].value; return o; };
+    if (+f.ap_amt.value) b.apply = {amount: f.ap_amt.value, category_id: cat, ...typ('ap_type', 'ap_payer')};
+    if (+f.fo_amt.value) b.forfeit = {amount: f.fo_amt.value, category_id: cat, note: f.fo_note.value || undefined, ...typ('fo_type', 'fo_payer')};
+    if (+f.ch_amt.value) b.charge = {amount: f.ch_amt.value, account_id: +f.ch_acct.value, category_id: cat, ...typ('ch_type', 'ch_payer')};
     return b;
   };
   const planLine = p => {
@@ -232,7 +242,7 @@ async function reserveCheckout(id, after) {
     if (p.action === 'link') return `🔗 ${t('Link the posted charge')}${p.final ? ' · ' + t('Final bill') : ''}`;
     const [ic, lb] = RS_ROLE[p.role] || ['•', p.role];
     const what = p.role === 'charge' ? (p.final ? t('Final bill') : t('Extra charge')) : t(lb);
-    const kind = p.kind === 'transfer' ? t('transfer') : t('expense');
+    const kind = p.kind === 'transfer' ? t('transfer') : (p.reimbursable ? t('Reimbursable') : t('expense'));
     return `${ic} ${esc(what)} <b>${money(p.amount, p.role === 'charge' && a ? a.currency : cur)}</b> <span class="muted">${esc(kind)}${a ? ' · ' + esc(a.name) : ''}${p.received != null && a && a.currency !== cur ? ' · ' + esc(t('arrives as {amt}', {amt: money(p.received, a.currency)})) : ''}</span>`;
   };
   let h;
@@ -252,7 +262,13 @@ async function reserveCheckout(id, after) {
   const syncMode = () => {
     if (hold) { const mode = (f.querySelector('[name=mode]:checked') || {}).value; $$('[data-mode]', f).forEach(el => el.hidden = el.dataset.mode !== mode); }
     else { const a = acctById(f.rf_acct.value); $('#rsRecv', bg).hidden = !a || a.currency === cur; $('#rsRecvCur', bg).textContent = a ? '(' + a.currency + ')' : ''; }
+    [['bill_type', 'bill'], ['ap_type', 'ap'], ['fo_type', 'fo'], ['ch_type', 'ch']].forEach(([name, key]) => {
+      const sel = f[name]; const on = sel && !sel.closest('[hidden]') && sel.value === 'reimbursable';
+      $$(`[data-payer="${key}"]`, f).forEach(el => { if (!el.closest('[data-mode]') || !el.hidden || on) el.hidden = !on; });
+    });
   };
+  if (!document.getElementById('dlPayer')) document.body.insertAdjacentHTML('beforeend', '<datalist id="dlPayer"></datalist>');
+  api('/api/reimbursements?status=all').then(d => { $('#dlPayer').innerHTML = (d.payers || []).map(p => `<option value="${esc(p)}">`).join(''); }).catch(() => {});
   f.addEventListener('input', () => { syncMode(); preview(); });
   f.addEventListener('change', () => { syncMode(); preview(); });
   syncMode(); preview();
