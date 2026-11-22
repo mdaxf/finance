@@ -632,17 +632,19 @@ API:
 
 IACF Personal Finance tracks money a hotel, rental company or landlord holds for you, from check-in to the refund. Open **🔒 Reserves** in the sidebar, or press **＋** and pick the **🔒 Reserve** tab.
 
-- **Card hold 预授权 (pre-authorization)** is a **note only**. No transaction is recorded, so card balances, net worth, budgets, reports and every KPI ignore it. While it is open, the card shows **🔒 On hold $X** and its available credit is lower by that amount. At check-out you enter the **final bill**, which is recorded once as a normal expense:
+- **Card hold 预授权 (pre-authorization)** is a **note only**. No transaction is recorded, so card balances, net worth, budgets, reports and every KPI ignore it. While it is open, the card shows **🔒 On hold $X** and its available credit is lower by that amount. At check-out you enter the **final bill**, which is recorded once as a transaction. Choose its **type**:
+  - **Expense** (default): a normal expense, counted as spending. This is the previous behaviour;
+  - **Reimbursable**: the same outflow (the card is charged now) flagged for [Reimbursements](#reimbursements-报销). It does not count as spending while it is open; when you later link the reimbursement that pays it back, only a written-off remainder counts. You can also set *Paid back by* (the company or person). After check-out, open the transaction to change the type (the Reimbursable checkbox), category or payer; the kind stays *expense* because the reserve link needs an outflow.
   - lower than the hold: the rest is **released** (nothing is recorded);
   - higher: the difference shows as **Over hold**;
   - no charge at all: **Release** (or **Booking cancelled**).
 - **Deposit 押金** is money that left your account and should come back. It is recorded as a **transfer** into the system account **Deposits 押金** (type receivable, one per currency, e.g. `Deposits 押金 (EUR)`). That account is created the first time you need it, never at startup. Net worth does not change and nothing counts as spending. At check-out, split what is left:
   - **Refund received**: a transfer back from Deposits to the account that got the money;
-  - **Applied to the bill**: an expense paid from the Deposits account;
-  - **Kept by the merchant** (damage, cleaning fee): an expense paid from the Deposits account;
-  - **Extra charge on the card**: a normal expense.
+  - **Applied to the bill**: an expense paid from the Deposits account (Expense or Reimbursable, chosen per part);
+  - **Kept by the merchant** (damage, cleaning fee): an expense paid from the Deposits account (Expense or Reimbursable);
+  - **Extra charge on the card**: an expense on the paying account (Expense or Reimbursable).
 
-  Only the applied and kept parts are spending. Interest paid on a deposit is ordinary income. A refund that came back as a *refund/income* (for example from an email) and is linked to a deposit is turned into a transfer from Deposits, so it is never income.
+  Only the applied and kept parts that were recorded as a normal expense are spending (a reimbursable part follows the Reimbursements rules above). Interest paid on a deposit is ordinary income. A refund that came back as a *refund/income* (for example from an email) and is linked to a deposit is turned into a transfer from Deposits, so it is never income.
 - **Foreign currency.** A deposit in another currency stores both amounts (EUR at Deposits, USD charged to the card). If it comes back at a different rate, enter the amount that arrived. A small difference (up to 3 % or 1 unit) is posted as an **FX adjustment** on the Deposits account (reason *Correction*, so it is excluded from income and expense), and the account returns to exactly 0. A larger difference is rejected.
 - **Check out** 退房结算 is one step with a live **preview** (a dry run that saves nothing). The detail view shows the amounts and a **timeline**: check-in, deposit, charges, refund, kept part, FX adjustment, check-out, reminder and closed. Prepaid non-refundable bookings are not reserves: record them as ordinary expenses.
 - **Linking** is many-to-many with partial amounts. One bill can cover two rooms, and a reserve can take several charges. Linking more than the remaining deposit, or more than the unlinked part of a transaction, is refused. Link from the reserve (🔗 Link transaction, with suggestions by merchant, card and dates) or from the transaction dialog (*Link to a reserve…*). Lists show a 🔒 badge. Deleting a transaction removes its links (DB trigger). A linked transaction keeps its kind and currency, and a whole-amount link follows an amount edit.
@@ -659,8 +661,9 @@ API:
 - `GET /api/reserves?state=open,partial (default)|settled|released|cancelled|all&method=hold|deposit&account_id=&project_id=&review=1` returns the items, with totals `on_hold` / `deposits` by currency and `state_counts`.
 - `POST /api/reserves` takes `{method, account_id, amount, currency?, merchant?, title?, start_date, end_date?, category_id?, project_id?, ref?, note?, remind?, paid_amount?}`. `GET|PUT|DELETE /api/reserves/{id}`; `DELETE` needs `?unlink=1` when transactions are linked, and the transactions stay.
 - `POST /api/reserves/{id}/settle` (check-out) takes `dry_run?` and either:
-  - hold: `{final: {amount | transaction_id, account_id?, category_id?, date?}}` or `{release: true}`;
-  - deposit: `{refund: {account_id, amount?, received?}, apply: {amount}, forfeit: {amount, note?}, charge: {amount, account_id?}}`.
+  - hold: `{final: {amount | transaction_id, account_id?, category_id?, date?, kind?, reimbursable?, reimb_payer?}}` or `{release: true}`;
+  - deposit: `{refund: {account_id, amount?, received?}, apply: {amount, kind?, reimbursable?, reimb_payer?}, forfeit: {amount, note?, kind?, reimbursable?}, charge: {amount, account_id?, kind?, reimbursable?}}`.
+    `kind` on a new charge is `expense` (default) or `reimbursable` (also accepted: `reimbursable=true`, or `kind=reimbursement` as the same flag). A deposit refund stays a transfer. Linking an existing charge or releasing a hold does not change a transaction's type.
 - `POST /api/reserves/{id}/links` takes `{transaction_id, role?, amount?, alloc_amount?, final?}` or `{items:[…]}` (all or nothing); `DELETE /api/reserves/links/{id}` unlinks.
 - `POST /api/reserves/{id}/release|close|cancel|reopen|confirm|to-transaction`, and `POST /api/review/{tid}/to-reserve` with `{method, …}`.
 - `GET /api/reserves/suggest?reserve_id=` or `?transaction_id=`, and `GET /api/reserves/export.csv`.

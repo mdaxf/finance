@@ -579,16 +579,51 @@ def unlink(db: Database, lid: int) -> dict:
     return get(db, l["reserve_id"])
 
 
+
+def _truthy(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    return str(v or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _charge_flags(part: dict | None) -> dict:
+    """Type of a checkout charge (final bill / applied / kept / extra charge).
+    These are outflows, so they are always recorded as kind=expense. `reimbursable`
+    (also accepted as kind=reimbursable or kind=reimbursement) flags the expense for
+    the Reimbursement Center: the account is charged now, but it does not count as
+    spending while the reimbursement is open. A deposit refund stays a transfer."""
+    part = part or {}
+    raw = str(part.get("kind") or "expense").strip().lower()
+    if raw in ("", "expense"):
+        flag = _truthy(part.get("reimbursable"))
+    elif raw in ("reimbursable", "reimbursement"):
+        flag = True
+    else:
+        raise ValidationError(
+            "A checkout charge is money leaving the account, so its type must be expense or reimbursable "
+            "(a reimbursable expense will be paid back). A deposit refund stays a transfer.")
+    out = {"kind": "expense", "reimbursable": 1 if flag else 0}
+    if flag:
+        for k in ("reimb_payer", "reimb_expected", "reimb_note"):
+            if part.get(k) not in (None, ""):
+                out[k] = part[k]
+    return out
+
+
 # ------------------------------------------------------------------ check-out / settle
 def settle(db: Database, rid: int, body: dict) -> dict:
     """Check-out in one step (all or nothing; dry_run previews it).
-    Hold:    {final: {transaction_id} | {amount, date?, category_id?, account_id?, note?}, charges?: [tid…]} → the final
-             bill is linked as a charge and the reserve settles (the rest of the hold is released, nothing recorded);
-             or {release: true} → released with no charge.
+    Hold:    {final: {transaction_id} | {amount, date?, category_id?, account_id?, note?, kind?, reimbursable?,
+             reimb_payer?}, charges?: [tid…]} → the final bill is linked as a charge and the reserve settles (the
+             rest of the hold is released, nothing recorded); or {release: true} → released with no charge.
+             kind/reimbursable apply only when a new transaction is created (not when linking or releasing).
     Deposit: {refund: {account_id, amount? (deposit returned, reserve currency; default = what is left), received?
-             (amount that arrived, account currency), date?}, apply: {amount, category_id?, date?, note?},
-             forfeit: {amount, category_id?, date?, note?}, charge: {amount, account_id?, category_id?} (extra bill
-             paid by card), charges?: [tid…]}."""
+             (amount that arrived, account currency), date?} (always a transfer), apply: {amount, category_id?,
+             date?, note?, kind?, reimbursable?, reimb_payer?}, forfeit: {amount, category_id?, date?, note?,
+             kind?, reimbursable?, reimb_payer?}, charge: {amount, account_id?, category_id?, kind?, reimbursable?,
+             reimb_payer?} (extra bill paid by card), charges?: [tid…]}.
+    A new charge (final / apply / forfeit / extra) is an expense. kind=expense (default) counts as spending;
+    kind=reimbursable (or reimbursable=true) is the same outflow flagged for the Reimbursement Center."""
     r0 = get(db, rid)
     dry = bool(body.get("dry_run"))
     rates, base = fx_rates(db), db.get_setting("base_currency", "USD")
@@ -618,13 +653,15 @@ def settle(db: Database, rid: int, body: dict) -> dict:
                         if amt is None:
                             raise ValidationError("Enter the final bill amount")
                         aid = int(fin.get("account_id") or r["account_id"])
-                        tid = _insert_tx(con, {**common, "kind": "expense", "account_id": aid, "amount": amt,
+                        flags = _charge_flags(fin)
+                        tid = _insert_tx(con, {**common, **flags, "account_id": aid, "amount": amt,
                                                "currency": fin.get("currency") or r["currency"],
                                                "category_id": fin.get("category_id") or r["category_id"],
                                                "date": (_day(fin.get("date")) or when[:10]) + when[10:],
                                                "note": fin.get("note") or f"Final bill 结账 · {title}"}, rates)
                         _link(con, rid, {"transaction_id": tid, "role": "charge", "final": True}, rates, base)
-                        plan.append({"action": "create", "kind": "expense", "role": "charge", "amount": amt, "account_id": aid, "final": True})
+                        plan.append({"action": "create", "kind": "expense", "reimbursable": bool(flags["reimbursable"]),
+                                     "role": "charge", "amount": amt, "account_id": aid, "final": True})
                 elif body.get("release"):
                     con.execute("UPDATE reserves SET closed_state='released', closed_reason='released', closed_at=? WHERE id=?", (now_iso(), rid))
                     plan.append({"action": "release"})
@@ -663,12 +700,14 @@ def settle(db: Database, rid: int, body: dict) -> dict:
                 for amt, part, role, default_note in ((ap_amt, ap, "apply", "Deposit applied to the bill 押金抵扣"),
                                                       (fo_amt, fo, "forfeit", "Deposit kept by the merchant 押金被扣")):
                     if amt:
-                        tid = _insert_tx(con, {**common, "kind": "expense", "account_id": dep_id, "amount": amt,
+                        flags = _charge_flags(part)
+                        tid = _insert_tx(con, {**common, **flags, "account_id": dep_id, "amount": amt,
                                                "currency": r["currency"], "category_id": part.get("category_id") or r["category_id"],
                                                "date": (_day(part.get("date")) or when[:10]) + when[10:],
                                                "note": (part.get("note") or default_note) + f" · {title}"}, rates)
                         _link(con, rid, {"transaction_id": tid, "role": role}, rates, base)
-                        plan.append({"action": "create", "kind": "expense", "role": role, "amount": amt, "account_id": dep_id})
+                        plan.append({"action": "create", "kind": "expense", "reimbursable": bool(flags["reimbursable"]),
+                                     "role": role, "amount": amt, "account_id": dep_id})
                 if rf and rf_amt and rf_amt > EPS:
                     to = rf_to
                     aid = to["id"]
@@ -686,11 +725,13 @@ def settle(db: Database, rid: int, body: dict) -> dict:
                 ch_amt = _num(ch.get("amount"), "extra charge")
                 if ch_amt:
                     aid = int(ch.get("account_id") or r["account_id"])
-                    tid = _insert_tx(con, {**common, "kind": "expense", "account_id": aid, "amount": ch_amt,
+                    flags = _charge_flags(ch)
+                    tid = _insert_tx(con, {**common, **flags, "account_id": aid, "amount": ch_amt,
                                            "currency": ch.get("currency") or r["currency"], "category_id": ch.get("category_id") or r["category_id"],
                                            "date": when, "note": ch.get("note") or f"Final bill 结账 · {title}"}, rates)
                     _link(con, rid, {"transaction_id": tid, "role": "charge"}, rates, base)
-                    plan.append({"action": "create", "kind": "expense", "role": "charge", "amount": ch_amt, "account_id": aid})
+                    plan.append({"action": "create", "kind": "expense", "reimbursable": bool(flags["reimbursable"]),
+                                 "role": "charge", "amount": ch_amt, "account_id": aid})
             _sync(con, rid)
             after = decorate(db, dict(con.execute(SELECT + " WHERE r.id=?", (rid,)).fetchone()), _links(con, [rid]).get(rid, []))
             if dry:
