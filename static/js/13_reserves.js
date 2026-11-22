@@ -207,14 +207,19 @@ async function reserveCheckout(id, after) {
       <fieldset class="full rs-co-box"><legend>➕ ${t('Extra charge on the card')}</legend><label class="f"><span>${t('Amount')}</span><input name="ch_amt" type="number" step="0.01" min="0" inputmode="decimal"></label><label class="f"><span>${t('Paid with')}</span><select name="ch_acct">${acctOptions(x.account_id, {filter: a => !a.archived && a.id !== x.deposit_account_id})}</select></label></fieldset>
       <label class="f"><span>${t('Category')}</span><select name="cat">${catOptions('expense', x.category_id)}</select></label>
       <label class="f"><span>${t('Date')}</span><input name="date" type="date" value="${esc(today())}"></label>`;
-  const bg = modal(`🧳 ${t('Check out')} · ${esc(x.label)}`, `<form class="form" id="rsCo" autocomplete="off">${body}</form><div class="rs-prev" id="rsPrev"></div>`,
+  const how = `<div class="full rs-co-how"><span class="small muted">${t('How it counts')}</span> <span class="chips">${[['rb', '↩️ ' + t('Reimbursable')], ['exp', '🧾 ' + t('Expense')]].map(([k, l], i) => `<label class="chip"><input type="radio" name="how" value="${k}" ${i === 0 ? 'checked' : ''}> ${l}</label>`).join('')}</span>
+      <div class="small muted" data-how="rb">${t('The bill and the kept / applied amounts are flagged reimbursable: they show in Reimbursements until they are paid back.')}</div></div>
+    <label class="f" data-how="rb"><span>${t('Reimburse from (company / person)')} <small class="muted">${t('optional')}</small></span><input name="payer" list="dlRsPayer"><datalist id="dlRsPayer"></datalist></label>`;
+  const bg = modal(`🧳 ${t('Check out')} · ${esc(x.label)}`, `<form class="form" id="rsCo" autocomplete="off">${body}${how}</form><div class="rs-prev" id="rsPrev"></div>`,
     {wide: true, buttons: `<button class="btn" data-x2>${t('Cancel')}</button><button class="btn pri" data-ok>✓ ${t('Check out')}</button>`});
   const f = $('#rsCo', bg);
+  api('/api/reimbursements?status=all').then(d => { const dl = $('#dlRsPayer', bg); if (dl) dl.innerHTML = d.payers.map(p => `<option value="${esc(p)}">`).join(''); }).catch(() => {});
   const payload = () => {
     const b = {date: f.date.value};
+    if (f.how.value === 'rb') { b.reimbursable = true; if (f.payer.value.trim()) b.reimb_payer = f.payer.value.trim(); }
     if (hold) {
       const mode = (f.querySelector('[name=mode]:checked') || {}).value;
-      if (mode === 'release') b.release = true;
+      if (mode === 'release') { delete b.reimbursable; delete b.reimb_payer; b.release = true; }
       else if (mode === 'link') b.final = {transaction_id: +f.tx.value};
       else b.final = {amount: f.bill.value, account_id: +f.bill_acct.value, category_id: f.bill_cat.value || null, date: f.date.value};
       return b;
@@ -229,11 +234,11 @@ async function reserveCheckout(id, after) {
   const planLine = p => {
     const a = acctById(p.account_id);
     if (p.action === 'release') return `✓ ${t('The hold is released: nothing is recorded')}`;
-    if (p.action === 'link') return `🔗 ${t('Link the posted charge')}${p.final ? ' · ' + t('Final bill') : ''}`;
+    if (p.action === 'link') return `🔗 ${t('Link the posted charge')}${p.final ? ' · ' + t('Final bill') : ''}${p.reimbursable ? ' · ' + t('reimbursable') : ''}`;
     const [ic, lb] = RS_ROLE[p.role] || ['•', p.role];
     const what = p.role === 'charge' ? (p.final ? t('Final bill') : t('Extra charge')) : t(lb);
     const kind = p.kind === 'transfer' ? t('transfer') : t('expense');
-    return `${ic} ${esc(what)} <b>${money(p.amount, p.role === 'charge' && a ? a.currency : cur)}</b> <span class="muted">${esc(kind)}${a ? ' · ' + esc(a.name) : ''}${p.received != null && a && a.currency !== cur ? ' · ' + esc(t('arrives as {amt}', {amt: money(p.received, a.currency)})) : ''}</span>`;
+    return `${ic} ${esc(what)} <b>${money(p.amount, p.role === 'charge' && a ? a.currency : cur)}</b> <span class="muted">${esc(p.reimbursable && p.kind === 'expense' ? t('reimbursable') + ' ' + kind : kind)}${a ? ' · ' + esc(a.name) : ''}${p.received != null && a && a.currency !== cur ? ' · ' + esc(t('arrives as {amt}', {amt: money(p.received, a.currency)})) : ''}</span>`;
   };
   let h;
   const preview = () => { clearTimeout(h); h = setTimeout(async () => {
@@ -250,6 +255,9 @@ async function reserveCheckout(id, after) {
     } catch (e) { el.innerHTML = `<div class="neg">⚠ ${esc(errText(e))}</div>`; $('[data-ok]', bg).disabled = true; }
   }, 250); };
   const syncMode = () => {
+    const release = hold && (f.querySelector('[name=mode]:checked') || {}).value === 'release';
+    $('.rs-co-how', f).hidden = release;
+    $$('[data-how]', f).forEach(el => el.hidden = release || el.dataset.how !== f.how.value);
     if (hold) { const mode = (f.querySelector('[name=mode]:checked') || {}).value; $$('[data-mode]', f).forEach(el => el.hidden = el.dataset.mode !== mode); }
     else { const a = acctById(f.rf_acct.value); $('#rsRecv', bg).hidden = !a || a.currency === cur; $('#rsRecvCur', bg).textContent = a ? '(' + a.currency + ')' : ''; }
   };

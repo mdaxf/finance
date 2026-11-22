@@ -333,6 +333,8 @@ class Database:
                 out.append("ingest_log.ref")
             if "as_expense" not in {r[1] for r in con.execute("PRAGMA table_info(transactions)")}:
                 out.append("transactions.as_expense")
+            if "reimb_done" not in {r[1] for r in con.execute("PRAGMA table_info(transactions)")}:
+                out.append("transactions.reimb_done")
             if "credits" in tables and "ledger" not in {r[1] for r in con.execute("PRAGMA table_info(credits)")}:
                 out.append("credits.ledger")
             if "credit_uses" in tables and "split_tx_id" not in {r[1] for r in con.execute("PRAGMA table_info(credit_uses)")}:
@@ -405,7 +407,8 @@ class Database:
                 con.execute("ALTER TABLE transactions ADD COLUMN pr_class TEXT")
             # additive migration: reimbursements 报销 (flag + optional fields on expenses, links from receipts)
             for col, typ in (("reimbursable", "INTEGER DEFAULT 0"), ("reimb_payer", "TEXT"), ("reimb_expected", "REAL"),
-                             ("reimb_note", "TEXT"), ("reimb_writeoff", "INTEGER DEFAULT 0")):
+                             ("reimb_note", "TEXT"), ("reimb_writeoff", "INTEGER DEFAULT 0"),
+                             ("reimb_done", "INTEGER DEFAULT 0")):
                 if col not in tcols:
                     con.execute(f"ALTER TABLE transactions ADD COLUMN {col} {typ}")
             con.execute("""CREATE TABLE IF NOT EXISTS reimb_links (id INTEGER PRIMARY KEY,

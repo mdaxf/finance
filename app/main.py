@@ -703,6 +703,15 @@ def create_app(db_path: str | os.PathLike | None = None, start_background: bool 
         except (ValueError, ledger.ValidationError) as e:
             raise HTTPException(400, str(e))
 
+    @app.post("/api/reimbursements/receipts/{rid}/complete")
+    def reimb_complete(rid: int, body: dict = Body(default={})):
+        """Mark a reimbursement complete: the unallocated rest is left as is and it is no longer offered when linking.
+        {"undo": true} reopens it."""
+        try:
+            return reimburse.complete(db, rid, bool((body or {}).get("undo")))
+        except ledger.ValidationError as e:
+            raise HTTPException(400, str(e))
+
     @app.post("/api/reimbursements/mark")
     def reimb_mark(body: dict = Body(...)):
         """{ids: [...], reimbursable: true|false, payer?}"""
