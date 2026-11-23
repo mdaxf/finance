@@ -58,12 +58,14 @@ VIEWS.reimb = async (v) => {
       ${rc.items.length ? `<div class="scroll-x"><table class="t rb-rc"><thead><tr><th>Date</th><th>Reimbursement</th><th class="right">Amount</th><th class="right">Allocated</th><th class="right">Unallocated</th><th>Linked expenses</th><th></th></tr></thead><tbody>
       ${rc.items.map(r => `<tr data-rid="${r.id}"><td class="nowrap small">${esc(r.date.slice(0, 10))}</td><td class="rb-open-tx"><b>${esc(r.reimb_payer || t('Reimbursement'))}</b><div class="small muted">${esc(r.account_name || '')}${r.note ? ' · ' + esc(r.note) : ''}</div></td>
         <td class="right nowrap pos">+${money(r.amount, r.currency)}</td><td class="right nowrap">${money(r.reimb_allocated, r.currency)}</td>
-        <td class="right nowrap ${r.reimb_unallocated > 0.005 ? 'warn-t' : 'muted'}"><b>${money(r.reimb_unallocated, r.currency)}</b></td>
+        <td class="right nowrap ${r.reimb_unallocated > 0.005 ? 'warn-t' : 'muted'}"><b>${money(r.reimb_unallocated, r.currency)}</b>${r.reimb_done ? `<div class="small muted">✓ ${t('Complete')}${r.reimb_leftover > 0.005 ? ' · ' + esc(t('{amt} left as is', {amt: money(r.reimb_leftover, r.currency)})) : ''}</div>` : ''}</td>
         <td class="rb-links">${r.links.map(l => rbLinkLine(l, 'expense')).join('') || '<span class="muted">—</span>'}</td>
-        <td class="rb-act">${r.reimb_unallocated > 0.005 ? `<button class="btn sm pri" data-lnr="${r.id}">🔗 ${t('Link expenses')}</button>` : ''} <button class="btn sm danger" data-delr="${r.id}" title="Delete the reimbursement: its links are removed and the expenses become outstanding again">${t('Delete')}</button></td></tr>`).join('')}</tbody></table></div>`
+        <td class="rb-act">${r.reimb_unallocated > 0.005 ? `<button class="btn sm pri" data-lnr="${r.id}">🔗 ${t('Link expenses')}</button> <button class="btn sm" data-rdone="${r.id}" title="${esc(t('Nothing more to link: the unallocated rest is left as is and it is no longer offered when linking'))}">✓ ${t('Mark complete')}</button>` : ''}${r.reimb_done ? `<button class="btn sm" data-rreopen="${r.id}">${t('Reopen')}</button>` : ''} <button class="btn sm danger" data-delr="${r.id}" title="Delete the reimbursement: its links are removed and the expenses become outstanding again">${t('Delete')}</button></td></tr>`).join('')}</tbody></table></div>`
       : `<div class="empty">${st.unallocOnly ? t('Every reimbursement is fully linked ✓') : t('No reimbursements recorded yet')}</div>`}`;
     $('#rbUn').onchange = e => { st.unallocOnly = e.target.checked; route(); };
     $$('[data-lnr]', body).forEach(b => b.onclick = () => rbLinkDialog({side: 'reimb', id: +b.dataset.lnr, after: route}));
+    $$('[data-rdone]', body).forEach(b => b.onclick = () => rbComplete(rc.items.find(r => r.id === +b.dataset.rdone), route));
+    $$('[data-rreopen]', body).forEach(b => b.onclick = () => rbComplete(rc.items.find(r => r.id === +b.dataset.rreopen), route, true));
     $$('[data-delr]', body).forEach(b => b.onclick = async () => {
       if (!await confirmBox('Delete this reimbursement? Its links are removed, the linked expenses become outstanding again (the account balance changes back).')) return;
       await guard(() => api('/api/transactions/' + b.dataset.delr, {method: 'DELETE'})); toast(t('Deleted')); route();
@@ -215,6 +217,12 @@ async function rbLinkDialog({side, id, after}) {
 }
 
 /* ---------- links box in the transaction dialog ---------- */
+/* a reimbursement with money left over that will never be linked: complete it, so it stops showing when linking */
+async function rbComplete(r, after, undo) {
+  if (!undo && !await confirmBox(t('Mark this reimbursement complete? The unallocated {amt} is left as is and it is no longer offered when you link expenses (you can reopen it).', {amt: money(r.reimb_unallocated, r.currency)}))) return;
+  await guard(() => api(`/api/reimbursements/receipts/${r.id}/complete`, {method: 'POST', body: undo ? {undo: true} : {}}));
+  toast(undo ? t('Reopened') : t('Marked complete')); after && after();
+}
 async function rbLinkBox(box, id, after) {
   const t0 = await api('/api/transactions/' + id);
   const isR = t0.kind === 'reimbursement';
@@ -222,13 +230,14 @@ async function rbLinkBox(box, id, after) {
   box.hidden = false;
   const links = t0.reimb_links || [];
   const sum = isR
-    ? `${t('Allocated')} <b>${money(t0.reimb_allocated, t0.currency)}</b> · ${t('Unallocated')} <b class="${t0.reimb_unallocated > 0.005 ? 'warn-t' : ''}">${money(t0.reimb_unallocated, t0.currency)}</b>`
+    ? `${t('Allocated')} <b>${money(t0.reimb_allocated, t0.currency)}</b> · ${t('Unallocated')} <b class="${t0.reimb_unallocated > 0.005 ? 'warn-t' : ''}">${money(t0.reimb_unallocated, t0.currency)}</b>${t0.reimb_done ? ` · ✓ ${t('Complete')}${t0.reimb_leftover > 0.005 ? ' · ' + esc(t('{amt} left as is', {amt: money(t0.reimb_leftover, t0.currency)})) : ''}` : ''}`
     : `${rbBadge(t0)} ${t('Reimbursed')} <b>${money(t0.reimb_settled, t0.currency)}</b> · ${t('Outstanding')} <b>${money(t0.reimb_outstanding, t0.currency)}</b>${t0.reimb_writeoff_amount ? ` · ${t('written off')} ${money(t0.reimb_writeoff_amount, t0.currency)}` : ''}`;
   const canLink = isR ? t0.reimb_unallocated > 0.005 : t0.reimb_state !== 'closed';
   box.innerHTML = `<div class="row" style="flex-wrap:wrap;gap:6px"><b>🔗 ${isR ? t('Pays back') : t('Paid back by')}</b><span class="small">${sum}</span><span class="sp"></span>
     ${canLink ? `<button type="button" class="btn sm pri" id="rbBoxLink">${isR ? t('Link expenses') : t('Link reimbursements')}…</button>` : ''}
     ${!isR && t0.reimb_state !== 'closed' ? `<button type="button" class="btn sm" id="rbBoxClose" title="Close it: the outstanding rest won't be reimbursed and counts as a normal expense">${t('Close &amp; write off')}</button>` : ''}
-    ${!isR && t0.reimb_closed_by === 'written_off' ? `<button type="button" class="btn sm" id="rbBoxReopen">${t('Reopen')}</button>` : ''}</div>
+    ${!isR && t0.reimb_closed_by === 'written_off' ? `<button type="button" class="btn sm" id="rbBoxReopen">${t('Reopen')}</button>` : ''}
+    ${isR && canLink ? `<button type="button" class="btn sm" id="rbBoxDone">✓ ${t('Mark complete')}</button>` : ''}${isR && t0.reimb_done ? `<button type="button" class="btn sm" id="rbBoxUndone">${t('Reopen')}</button>` : ''}</div>
     <div class="rb-links">${links.map(l => rbLinkLine(l, isR ? 'expense' : 'reimb')).join('') || `<span class="small muted">${isR ? t('Not linked to any expense yet.') : t('No reimbursement linked yet.')}</span>`}</div>`;
   const re = () => { rbLinkBox(box, id, after); after && after(); };
   rbBindLinkButtons(box, re);
@@ -237,6 +246,8 @@ async function rbLinkBox(box, id, after) {
     if (!await confirmBox(t('Close this expense? The outstanding {amt} won\'t be reimbursed and counts as a normal expense (you can reopen it).', {amt: money(t0.reimb_outstanding, t0.currency)}))) return;
     await guard(() => api(`/api/reimbursements/${id}/close`, {method: 'POST'})); toast(t('Closed')); re();
   }, box);
+  bind('#rbBoxDone', 'click', () => rbComplete(t0, re), box);
+  bind('#rbBoxUndone', 'click', () => rbComplete(t0, re, true), box);
   bind('#rbBoxReopen', 'click', async () => { await guard(() => api(`/api/reimbursements/${id}/reopen`, {method: 'POST'})); toast(t('Reopened')); re(); }, box);
 }
 

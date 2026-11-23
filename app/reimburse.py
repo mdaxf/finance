@@ -12,7 +12,9 @@
 * Expense:  reimbursed = Σ link amounts, outstanding = expected − reimbursed.
   State open (nothing reimbursed) → partial → closed. It closes by itself when outstanding reaches 0, or by hand
   (close = write-off 核销: the rest won't be reimbursed); reopen undoes a manual close.
-  Reimbursement: allocated = Σ alloc amounts, unallocated = amount − allocated.
+  Reimbursement: allocated = Σ alloc amounts, unallocated = amount − allocated. A reimbursement with money left can be
+  marked complete 完成 (reimb_done=1): the rest is left as is (reimb_leftover), unallocated shows 0 and it is no longer
+  offered when linking; reopen undoes it.
 * Stats (ledger.REPORT_AMOUNT_SQL): a reimbursement is never income; a reimbursable expense counts 0 while open/partial
   and amount − reimbursed once closed, i.e. the reimbursed part never counts and only the written-off remainder does.
 * Legacy status names are kept in `reimb_status`: pending (= open) / partial / settled (closed: fully reimbursed) /
@@ -84,8 +86,9 @@ def _decorate(t: dict, settled: float, links: list[dict] | None) -> dict:
 
 
 def _decorate_receipt(r: dict, allocated: float, n: int, links: list[dict] | None) -> dict:
-    r.update(reimb_allocated=_r2(allocated), reimb_unallocated=_r2(max((r["amount"] or 0) - allocated, 0.0)),
-             reimb_link_count=n)
+    left, done = _r2(max((r["amount"] or 0) - allocated, 0.0)), bool(r.get("reimb_done"))
+    r.update(reimb_allocated=_r2(allocated), reimb_unallocated=0.0 if done else left, reimb_leftover=left,
+             reimb_done=done, reimb_link_count=n)
     if links is not None:
         r["links"] = links
     return r
@@ -301,7 +304,7 @@ def receipts(db: Database, limit: int = 100, unallocated_only: bool = False) -> 
     """Reimbursements, newest first, with allocated / unallocated and their links."""
     where = "t.kind='reimbursement' AND t.status='posted'"
     if unallocated_only:
-        where += (" AND t.amount - COALESCE((SELECT SUM(COALESCE(l.alloc_amount, l.amount)) FROM reimb_links l "
+        where += (" AND COALESCE(t.reimb_done,0)=0 AND t.amount - COALESCE((SELECT SUM(COALESCE(l.alloc_amount, l.amount)) FROM reimb_links l "
                   "WHERE l.receipt_id=t.id),0) > 0.005")
     rows = [decorate(r) for r in db.all(f"{TX_SELECT} WHERE {where} ORDER BY t.date DESC, t.id DESC LIMIT ?",
                                         (max(1, min(int(limit), 500)),))]
@@ -328,6 +331,8 @@ def _receipt_for_link(con, rid: int):
         raise ValidationError(f"Transaction {rid} is not a reimbursement")
     if r["status"] != "posted":
         raise ValidationError(f"Reimbursement {rid} is still in review: approve it first")
+    if r["reimb_done"]:
+        raise ValidationError(f"Reimbursement {rid} is marked complete: reopen it first")
     return r
 
 
@@ -532,6 +537,17 @@ def write_off(db: Database, tid: int, undo: bool = False) -> dict:
     with db.tx() as con:
         con.execute("UPDATE transactions SET reimb_writeoff=?, updated_at=? WHERE id=?", (0 if undo else 1, now_iso(), tid))
     return expense_status(db, tid)
+
+
+def complete(db: Database, rid: int, undo: bool = False) -> dict:
+    """Mark a reimbursement complete (the unallocated rest is left as is and it is no longer offered for linking) or
+    reopen it (undo)."""
+    r = db.one("SELECT kind FROM transactions WHERE id=?", (rid,))
+    if not r or r["kind"] != "reimbursement":
+        raise ValidationError("Not a reimbursement")
+    with db.tx() as con:
+        con.execute("UPDATE transactions SET reimb_done=?, updated_at=? WHERE id=?", (0 if undo else 1, now_iso(), rid))
+    return receipt(db, rid)
 
 
 def mark(db: Database, ids: list[int], flag: bool, payer: str | None = None) -> dict:

@@ -588,7 +588,8 @@ def settle(db: Database, rid: int, body: dict) -> dict:
     Deposit: {refund: {account_id, amount? (deposit returned, reserve currency; default = what is left), received?
              (amount that arrived, account currency), date?}, apply: {amount, category_id?, date?, note?},
              forfeit: {amount, category_id?, date?, note?}, charge: {amount, account_id?, category_id?} (extra bill
-             paid by card), charges?: [tid…]}."""
+             paid by card), charges?: [tid…]}.
+    Both: reimbursable (true = the expenses recorded or linked here are flagged reimbursable 可报销, with reimb_payer)."""
     r0 = get(db, rid)
     dry = bool(body.get("dry_run"))
     rates, base = fx_rates(db), db.get_setting("base_currency", "USD")
@@ -604,27 +605,37 @@ def settle(db: Database, rid: int, body: dict) -> dict:
             title = r["title"] or f"Reserve #{rid}"
             common = {"project_id": r["project_id"], "member_id": r["member_id"], "ledger_id": r["ledger_id"] or 1,
                       "merchant_id": r["merchant_id"], "source": "reserve", "is_demo": r["is_demo"] or 0}
+            rb = bool(body.get("reimbursable"))
+            payer = (str(body.get("reimb_payer") or "").strip() or None) if rb else None
+            exp = {**common, **({"reimbursable": 1, "reimb_payer": payer} if rb else {})}  # the expenses recorded here
+
+            def flag(tid):  # an expense linked here becomes reimbursable too (its payer is kept when it has one)
+                if rb:
+                    con.execute("""UPDATE transactions SET reimbursable=1, reimb_payer=COALESCE(NULLIF(reimb_payer,''),?), updated_at=?
+                                   WHERE id=? AND kind='expense' AND COALESCE(reimbursable,0)=0""", (payer, now_iso(), tid))
             for tid in body.get("charges") or []:
                 _link(con, rid, {"transaction_id": tid, "role": "charge"}, rates, base)
-                plan.append({"action": "link", "role": "charge", "transaction_id": tid})
+                flag(tid)
+                plan.append({"action": "link", "role": "charge", "transaction_id": tid, "reimbursable": rb})
             if r["method"] == "hold":
                 fin = body.get("final")
                 if fin:
                     if fin.get("transaction_id"):
                         _link(con, rid, {"transaction_id": fin["transaction_id"], "role": "charge", "final": True}, rates, base)
-                        plan.append({"action": "link", "role": "charge", "transaction_id": fin["transaction_id"], "final": True})
+                        flag(int(fin["transaction_id"]))
+                        plan.append({"action": "link", "role": "charge", "transaction_id": fin["transaction_id"], "final": True, "reimbursable": rb})
                     else:
                         amt = _num(fin.get("amount"), "final bill amount")
                         if amt is None:
                             raise ValidationError("Enter the final bill amount")
                         aid = int(fin.get("account_id") or r["account_id"])
-                        tid = _insert_tx(con, {**common, "kind": "expense", "account_id": aid, "amount": amt,
+                        tid = _insert_tx(con, {**exp, "kind": "expense", "account_id": aid, "amount": amt,
                                                "currency": fin.get("currency") or r["currency"],
                                                "category_id": fin.get("category_id") or r["category_id"],
                                                "date": (_day(fin.get("date")) or when[:10]) + when[10:],
                                                "note": fin.get("note") or f"Final bill 结账 · {title}"}, rates)
                         _link(con, rid, {"transaction_id": tid, "role": "charge", "final": True}, rates, base)
-                        plan.append({"action": "create", "kind": "expense", "role": "charge", "amount": amt, "account_id": aid, "final": True})
+                        plan.append({"action": "create", "kind": "expense", "role": "charge", "amount": amt, "account_id": aid, "final": True, "reimbursable": rb})
                 elif body.get("release"):
                     con.execute("UPDATE reserves SET closed_state='released', closed_reason='released', closed_at=? WHERE id=?", (now_iso(), rid))
                     plan.append({"action": "release"})
@@ -663,12 +674,12 @@ def settle(db: Database, rid: int, body: dict) -> dict:
                 for amt, part, role, default_note in ((ap_amt, ap, "apply", "Deposit applied to the bill 押金抵扣"),
                                                       (fo_amt, fo, "forfeit", "Deposit kept by the merchant 押金被扣")):
                     if amt:
-                        tid = _insert_tx(con, {**common, "kind": "expense", "account_id": dep_id, "amount": amt,
+                        tid = _insert_tx(con, {**exp, "kind": "expense", "account_id": dep_id, "amount": amt,
                                                "currency": r["currency"], "category_id": part.get("category_id") or r["category_id"],
                                                "date": (_day(part.get("date")) or when[:10]) + when[10:],
                                                "note": (part.get("note") or default_note) + f" · {title}"}, rates)
                         _link(con, rid, {"transaction_id": tid, "role": role}, rates, base)
-                        plan.append({"action": "create", "kind": "expense", "role": role, "amount": amt, "account_id": dep_id})
+                        plan.append({"action": "create", "kind": "expense", "role": role, "amount": amt, "account_id": dep_id, "reimbursable": rb})
                 if rf and rf_amt and rf_amt > EPS:
                     to = rf_to
                     aid = to["id"]
@@ -686,11 +697,11 @@ def settle(db: Database, rid: int, body: dict) -> dict:
                 ch_amt = _num(ch.get("amount"), "extra charge")
                 if ch_amt:
                     aid = int(ch.get("account_id") or r["account_id"])
-                    tid = _insert_tx(con, {**common, "kind": "expense", "account_id": aid, "amount": ch_amt,
+                    tid = _insert_tx(con, {**exp, "kind": "expense", "account_id": aid, "amount": ch_amt,
                                            "currency": ch.get("currency") or r["currency"], "category_id": ch.get("category_id") or r["category_id"],
                                            "date": when, "note": ch.get("note") or f"Final bill 结账 · {title}"}, rates)
                     _link(con, rid, {"transaction_id": tid, "role": "charge"}, rates, base)
-                    plan.append({"action": "create", "kind": "expense", "role": "charge", "amount": ch_amt, "account_id": aid})
+                    plan.append({"action": "create", "kind": "expense", "role": "charge", "amount": ch_amt, "account_id": aid, "reimbursable": rb})
             _sync(con, rid)
             after = decorate(db, dict(con.execute(SELECT + " WHERE r.id=?", (rid,)).fetchone()), _links(con, [rid]).get(rid, []))
             if dry:
